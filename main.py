@@ -111,14 +111,19 @@ async def health() -> dict[str, str]:
 @app.get("/download")
 async def download(
     url: str = Query(..., description="YouTube URL to process"),
-    semitones: int = Query(0, ge=-24, le=24, description="Pitch shift in semitones"),
-    cents: int = Query(0, ge=-100, le=100, description="Additional pitch shift in cents"),
+    pitch: float = Query(
+        0.0,
+        ge=-6.0,
+        le=6.0,
+        description="Pitch shift in semitones (range -6.0..6.0, step 0.1)",
+    ),
 ):
     if not _is_valid_url(url):
         raise HTTPException(status_code=400, detail="Invalid URL.")
 
-    total_cents = semitones * 100 + cents
-    pitch_factor = 2 ** (total_cents / 1200)
+    # Match the extension's slider: clamp to step 0.1.
+    pitch = round(pitch * 10) / 10
+    pitch_factor = 2 ** (pitch / 12)
 
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
     try:
@@ -126,7 +131,7 @@ async def download(
         output = workdir / f"shifted_{uuid.uuid4().hex}.mp3"
         await _apply_pitch_shift(source, output, pitch_factor)
 
-        filename = f"drakonrhym_{semitones:+d}st_{cents:+d}c.mp3"
+        filename = f"drakonrhym_{pitch:+.1f}st.mp3"
         return FileResponse(
             path=output,
             media_type="audio/mpeg",

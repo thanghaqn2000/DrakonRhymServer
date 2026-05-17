@@ -14,25 +14,23 @@ Health check.
 ### `GET /download`
 Download a YouTube audio track, pitch-shifted by the given amount.
 
-| Query param | Type | Range       | Default | Description                                |
-|-------------|------|-------------|---------|--------------------------------------------|
-| `url`       | str  | required    | —       | YouTube URL                                |
-| `semitones` | int  | `-24..24`   | `0`     | Pitch shift in semitones                   |
-| `cents`     | int  | `-100..100` | `0`     | Additional pitch shift in cents            |
+| Query param | Type  | Range       | Default | Description                                   |
+|-------------|-------|-------------|---------|-----------------------------------------------|
+| `url`       | str   | required    | —       | YouTube URL                                   |
+| `pitch`     | float | `-6.0..6.0` | `0.0`   | Pitch shift in semitones (rounded to step 0.1)|
 
-The pitch factor is computed as:
+`pitch` mirrors the slider in the DrakonRhym browser extension: one value in semitones (with one decimal place — `0.1` ≈ 10 cents). The server rounds to step `0.1` and computes:
 
 ```
-total_cents = semitones * 100 + cents
-pitch_factor = 2 ** (total_cents / 1200)
+pitch_factor = 2 ** (pitch / 12)
 ```
 
-The shift is applied via FFmpeg's `rubberband` filter (`rubberband=pitch={pitch_factor}`), which preserves the original tempo while shifting pitch. This matches the audio output produced by the DrakonRhym browser extension, whose AudioWorklet uses a RubberBand-style WASM processor.
+The shift is applied via FFmpeg's `rubberband` filter (`rubberband=pitch={pitch_factor}`), which preserves the original tempo while shifting pitch. This matches the audio output produced by the extension's RubberBand-style WASM AudioWorklet.
 
 Example:
 
 ```
-curl -L -o out.mp3 "http://localhost:8000/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&semitones=2&cents=50"
+curl -L -o out.mp3 "http://localhost:8000/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&pitch=2.5"
 ```
 
 ## Run locally

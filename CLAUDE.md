@@ -26,7 +26,7 @@ docker run --rm -p 8000:8000 drakonrhym-server
 Smoke-test an endpoint:
 
 ```bash
-curl -L -o out.mp3 "http://localhost:8000/download?url=<youtube_url>&semitones=2&cents=50"
+curl -L -o out.mp3 "http://localhost:8000/download?url=<youtube_url>&pitch=2.5"
 curl http://localhost:8000/health
 ```
 
@@ -36,7 +36,8 @@ There is no test suite yet. If you add one, prefer `pytest` + `httpx.AsyncClient
 
 - **Request lifecycle (`/download`)**: each request gets its own `tempfile.mkdtemp(prefix="drakonrhym_")` workdir. `yt-dlp` writes `source.<ext>` into it, then `ffmpeg` writes `shifted_<uuid>.mp3`. The response is a `FileResponse` with a Starlette `BackgroundTask` that removes the workdir **after** the file is fully sent. On any exception path the workdir is removed synchronously in the `finally`/`except` block — keep both paths in sync if you refactor.
 - **Subprocess discipline**: all external commands go through `_run_subprocess`, which uses `asyncio.create_subprocess_exec` so the event loop is never blocked. Do not switch to `subprocess.run` or `os.system`; that would serialize all in-flight requests.
-- **Pitch shift formula**: `pitch_factor = 2 ** ((semitones*100 + cents) / 1200)`, applied as the FFmpeg filter `rubberband=pitch={pitch_factor}`. This preserves tempo while shifting pitch, matching the RubberBand-style WASM processor used by the DrakonRhym browser extension (`extensions-ee-pitch-changer-s` in `smartProcessor.bundle.js`). Do not switch to `asetrate+aresample` — that changes tempo and produces a different output than the extension.
+- **Pitch input**: a single `pitch` float in semitones, range `-6.0..6.0`, rounded server-side to step `0.1`. This mirrors the extension's slider (`popup-simple.js`: `min=-6, max=6, step=0.1`). The extension internally splits this into `pitchValueSemitones` (integer part) and `pitchValueCents` (fractional × 100) before passing to its WASM processor, but the math is equivalent — do not re-introduce two separate params on the backend; one float is the source of truth.
+- **Pitch shift formula**: `pitch_factor = 2 ** (pitch / 12)`, applied as the FFmpeg filter `rubberband=pitch={pitch_factor}`. This preserves tempo while shifting pitch, matching the RubberBand-style WASM processor used by the extension (`extensions-ee-pitch-changer-s` in `smartProcessor.bundle.js`). Do not switch to `asetrate+aresample` — that changes tempo and produces a different output than the extension.
 - **FFmpeg requirement**: the `rubberband` filter is mandatory. Debian's `ffmpeg` package (used in the Docker image) ships with `librubberband` linked in. If you change the base image, verify `ffmpeg -filters | grep rubberband` still succeeds.
 - **Error mapping**: `_download_audio` → HTTP 400 (treated as caller-supplied bad URL); `ffprobe`/`ffmpeg` failures → HTTP 500. URL validation is intentionally loose (`http`/`https` + non-empty netloc) and defers the real check to `yt-dlp`.
 - **CORS**: wide open (`allow_origins=["*"]`) by design for early development. This must be tightened before any public deployment — do not assume the current setting is safe.
