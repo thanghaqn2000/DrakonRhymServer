@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -76,35 +75,10 @@ async def _download_audio(url: str, workdir: Path) -> Path:
     return candidates[0]
 
 
-async def _probe_sample_rate(path: Path) -> int:
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "a:0",
-        "-show_entries",
-        "stream=sample_rate",
-        "-of",
-        "json",
-        str(path),
-    ]
-    code, stdout, stderr = await _run_subprocess(cmd)
-    if code != 0:
-        logger.error("ffprobe failed: %s", stderr.decode(errors="replace"))
-        raise HTTPException(status_code=500, detail="Could not read audio metadata.")
-    try:
-        data = json.loads(stdout.decode())
-        return int(data["streams"][0]["sample_rate"])
-    except (KeyError, IndexError, ValueError, json.JSONDecodeError) as e:
-        logger.error("Could not parse ffprobe output: %s", e)
-        raise HTTPException(status_code=500, detail="Could not parse audio metadata.")
-
-
 async def _apply_pitch_shift(src: Path, dst: Path, pitch_factor: float) -> None:
-    sample_rate = await _probe_sample_rate(src)
-    new_rate = int(round(sample_rate * pitch_factor))
-    filter_chain = f"asetrate={new_rate},aresample={sample_rate}"
+    # rubberband filter shifts pitch while preserving tempo, matching the
+    # RubberBand-style WASM processor used by the DrakonRhym browser extension.
+    filter_chain = f"rubberband=pitch={pitch_factor:.6f}"
     cmd = [
         "ffmpeg",
         "-y",

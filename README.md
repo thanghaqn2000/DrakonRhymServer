@@ -27,7 +27,7 @@ total_cents = semitones * 100 + cents
 pitch_factor = 2 ** (total_cents / 1200)
 ```
 
-The shift is applied via FFmpeg using `asetrate={sr*pitch_factor},aresample={sr}`. This shifts pitch while also changing duration (faster for upshifts, slower for downshifts) — a simple, dependency-free approach.
+The shift is applied via FFmpeg's `rubberband` filter (`rubberband=pitch={pitch_factor}`), which preserves the original tempo while shifting pitch. This matches the audio output produced by the DrakonRhym browser extension, whose AudioWorklet uses a RubberBand-style WASM processor.
 
 Example:
 
@@ -59,4 +59,4 @@ docker run --rm -p 8000:8000 drakonrhym-server
 
 - CORS is currently wide open (`allow_origins=["*"]`) — lock this down before deploying publicly.
 - Each request uses a unique temp directory, which is removed after the response is sent (via Starlette `BackgroundTask`).
-- The pitch-shift method changes tempo together with pitch. If true pitch-only shifting is needed later, swap to `rubberband` filter (requires `librubberband` in the FFmpeg build).
+- Requires an FFmpeg build with `librubberband` (Debian's `ffmpeg` package and Homebrew's `ffmpeg` both include it by default).
