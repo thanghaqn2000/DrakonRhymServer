@@ -16,6 +16,19 @@ from starlette.background import BackgroundTask
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("drakonrhym")
 
+MAX_CONCURRENT = int(os.getenv("DRAKON_MAX_CONCURRENT", "2"))
+YT_DLP_TIMEOUT = int(os.getenv("DRAKON_YT_DLP_TIMEOUT", "300"))
+FFMPEG_TIMEOUT = int(os.getenv("DRAKON_FFMPEG_TIMEOUT", "600"))
+ALLOWED_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+}
+
+_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
 app = FastAPI(title="DrakonRhymServer", version="0.1.0")
 
 app.add_middleware(
@@ -24,28 +37,49 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Pitch-Applied"],
 )
 
 
-def _is_valid_url(url: str) -> bool:
+def _is_valid_youtube_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
-        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
     except Exception:
         return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.netloc or "").lower().split(":")[0]
+    return host in ALLOWED_HOSTS
 
 
-async def _run_subprocess(cmd: list[str]) -> tuple[int, bytes, bytes]:
+async def _run_subprocess(
+    cmd: list[str], timeout: int, req_id: str, label: str
+) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("[%s] %s timed out after %ds; killing", req_id, label, timeout)
+        proc.kill()
+        await proc.wait()
+        raise HTTPException(
+            status_code=504,
+            detail=f"{label} timed out after {timeout}s.",
+        )
+    except asyncio.CancelledError:
+        # Client disconnected. Make sure we don't leak the subprocess.
+        logger.info("[%s] %s cancelled; killing subprocess", req_id, label)
+        proc.kill()
+        await proc.wait()
+        raise
     return proc.returncode or 0, stdout, stderr
 
 
-async def _download_audio(url: str, workdir: Path) -> Path:
+async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
     output_template = str(workdir / "source.%(ext)s")
     cmd = [
         sys.executable,
@@ -53,6 +87,10 @@ async def _download_audio(url: str, workdir: Path) -> Path:
         "yt_dlp",
         "--no-playlist",
         "--no-warnings",
+        "--socket-timeout",
+        "30",
+        "--retries",
+        "2",
         "-f",
         "bestaudio/best",
         "-x",
@@ -64,9 +102,9 @@ async def _download_audio(url: str, workdir: Path) -> Path:
         output_template,
         url,
     ]
-    code, _, stderr = await _run_subprocess(cmd)
+    code, _, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp")
     if code != 0:
-        logger.error("yt-dlp failed: %s", stderr.decode(errors="replace"))
+        logger.error("[%s] yt-dlp failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=400, detail="Failed to download audio from the given URL.")
 
     candidates = list(workdir.glob("source.*"))
@@ -75,10 +113,20 @@ async def _download_audio(url: str, workdir: Path) -> Path:
     return candidates[0]
 
 
-async def _apply_pitch_shift(src: Path, dst: Path, pitch_factor: float) -> None:
+async def _apply_pitch_shift(
+    src: Path, dst: Path, pitch_factor: float, req_id: str
+) -> None:
     # rubberband filter shifts pitch while preserving tempo, matching the
     # RubberBand-style WASM processor used by the DrakonRhym browser extension.
-    filter_chain = f"rubberband=pitch={pitch_factor:.6f}"
+    # quality/transients/detector/phase tuned for offline rendering, where we
+    # do not have the realtime-latency constraint the worklet operates under.
+    filter_chain = (
+        f"rubberband=pitch={pitch_factor:.6f}"
+        ":pitchq=quality"
+        ":transients=crisp"
+        ":detector=compound"
+        ":phase=laminar"
+    )
     cmd = [
         "ffmpeg",
         "-y",
@@ -93,9 +141,9 @@ async def _apply_pitch_shift(src: Path, dst: Path, pitch_factor: float) -> None:
         "2",
         str(dst),
     ]
-    code, _, stderr = await _run_subprocess(cmd)
+    code, _, stderr = await _run_subprocess(cmd, FFMPEG_TIMEOUT, req_id, "ffmpeg")
     if code != 0:
-        logger.error("ffmpeg failed: %s", stderr.decode(errors="replace"))
+        logger.error("[%s] ffmpeg failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=500, detail="Failed to apply pitch shift.")
 
 
@@ -118,33 +166,47 @@ async def download(
         description="Pitch shift in semitones (range -6.0..6.0, step 0.1)",
     ),
 ):
-    if not _is_valid_url(url):
-        raise HTTPException(status_code=400, detail="Invalid URL.")
+    if not _is_valid_youtube_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL — only YouTube domains are accepted.",
+        )
 
     # Match the extension's slider: clamp to step 0.1.
     pitch = round(pitch * 10) / 10
     pitch_factor = 2 ** (pitch / 12)
 
+    req_id = uuid.uuid4().hex[:8]
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
+    delivered = False
     try:
-        source = await _download_audio(url, workdir)
-        output = workdir / f"shifted_{uuid.uuid4().hex}.mp3"
-        await _apply_pitch_shift(source, output, pitch_factor)
+        async with _download_semaphore:
+            logger.info("[%s] download url=%s pitch=%+.1f", req_id, url, pitch)
+            source = await _download_audio(url, workdir, req_id)
+            output = workdir / f"shifted_{req_id}.mp3"
+            await _apply_pitch_shift(source, output, pitch_factor, req_id)
 
         filename = f"drakonrhym_{pitch:+.1f}st.mp3"
-        return FileResponse(
+        response = FileResponse(
             path=output,
             media_type="audio/mpeg",
             filename=filename,
             background=BackgroundTask(_cleanup, workdir),
+            headers={"X-Pitch-Applied": f"{pitch:.1f}"},
         )
+        delivered = True
+        return response
     except HTTPException:
-        _cleanup(workdir)
+        raise
+    except asyncio.CancelledError:
+        logger.info("[%s] request cancelled by client", req_id)
         raise
     except Exception as e:
-        _cleanup(workdir)
-        logger.exception("Unexpected error during download.")
+        logger.exception("[%s] unexpected error", req_id)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+    finally:
+        if not delivered:
+            _cleanup(workdir)
 
 
 if __name__ == "__main__":
