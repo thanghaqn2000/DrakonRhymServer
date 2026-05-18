@@ -74,9 +74,11 @@ _google_request = google_requests.Request()
 
 
 class _RateLimiter:
-    """Sliding 24h window counter, keyed by user sub. In-memory, single-process."""
+    """Sliding window counter, keyed by an arbitrary string. In-memory,
+    single-process — fine for one uvicorn worker. Production with multiple
+    workers/instances should swap this for Redis."""
 
-    def __init__(self, limit: int, window_seconds: int = 86400) -> None:
+    def __init__(self, limit: int, window_seconds: int) -> None:
         self._limit = limit
         self._window = window_seconds
         self._hits: dict[str, list[float]] = {}
@@ -95,16 +97,26 @@ class _RateLimiter:
             self._hits[key] = timestamps
             return True, self._limit - len(timestamps)
 
-    async def remaining(self, key: str) -> int:
+    async def refund(self, key: str) -> None:
+        """Pop the most recent recorded hit for `key`. Used when a consumed
+        request later fails for a reason that isn't the user's fault."""
         async with self._lock:
-            now = time.time()
-            cutoff = now - self._window
-            timestamps = [t for t in self._hits.get(key, []) if t > cutoff]
-            self._hits[key] = timestamps
-            return max(0, self._limit - len(timestamps))
+            timestamps = self._hits.get(key)
+            if not timestamps:
+                return
+            timestamps.pop()
+            if timestamps:
+                self._hits[key] = timestamps
+            else:
+                # Drop empty entries so the dict doesn't grow with each user.
+                self._hits.pop(key, None)
 
 
-_rate_limiter = _RateLimiter(limit=RATE_LIMIT_PER_DAY)
+# Daily quota on /api/download (the expensive endpoint).
+_download_rate = _RateLimiter(limit=RATE_LIMIT_PER_DAY, window_seconds=86400)
+# Burst cap on /api/metadata so authenticated users can't pin yt-dlp
+# subprocesses by spamming the metadata endpoint.
+_metadata_rate = _RateLimiter(limit=30, window_seconds=60)
 
 
 def _verify_google_id_token(authorization: str | None) -> str | None:
@@ -178,7 +190,7 @@ async def _run_subprocess(
         proc.kill()
         await proc.wait()
         raise
-    return proc.returncode or 0, stdout, stderr
+    return proc.returncode, stdout, stderr
 
 
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
@@ -298,9 +310,20 @@ async def health() -> dict[str, str]:
 @app.get("/api/metadata")
 async def metadata(
     url: str = Query(..., description="YouTube URL"),
-    authorization: str | None = Header(None),
+    authorization: str | None = Header(None, alias="Authorization"),
 ):
-    _verify_google_id_token(authorization)
+    user_sub = _verify_google_id_token(authorization)
+    # Burst cap: signed-in users can't spam yt-dlp subprocesses by hammering
+    # this endpoint. Generous enough that a normal page load (one call per
+    # download) is never affected.
+    if user_sub is not None:
+        allowed, _ = await _metadata_rate.consume(user_sub)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many metadata requests. Please slow down.",
+            )
+
     if not _is_valid_youtube_url(url):
         raise HTTPException(
             status_code=400,
@@ -350,11 +373,20 @@ async def download(
         le=6.0,
         description="Pitch shift in semitones (range -6.0..6.0, step 0.1)",
     ),
-    authorization: str | None = Header(None),
+    authorization: str | None = Header(None, alias="Authorization"),
 ):
     user_sub = _verify_google_id_token(authorization)
+
+    # Validate URL BEFORE consuming quota — a bad URL is the caller's fault
+    # but shouldn't burn one of their daily downloads.
+    if not _is_valid_youtube_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL — only YouTube domains are accepted.",
+        )
+
     if user_sub is not None:
-        allowed, remaining = await _rate_limiter.consume(user_sub)
+        allowed, remaining = await _download_rate.consume(user_sub)
         if not allowed:
             raise HTTPException(
                 status_code=429,
@@ -362,12 +394,6 @@ async def download(
             )
     else:
         remaining = None
-
-    if not _is_valid_youtube_url(url):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid URL — only YouTube domains are accepted.",
-        )
 
     # Match the extension's slider: clamp to step 0.1 using half-away-from-zero
     # rounding (1.25 -> 1.3, not 1.2 as Python's banker's-rounding `round` gives).
@@ -398,12 +424,21 @@ async def download(
         delivered = True
         return response
     except HTTPException:
+        # The caller's quota was already consumed before we knew whether the
+        # video was actually fetchable. Refund so failed downloads don't eat
+        # their daily budget. Cancellations and unexpected 500s also refund.
+        if user_sub is not None:
+            await _download_rate.refund(user_sub)
         raise
     except asyncio.CancelledError:
         logger.info("[%s] request cancelled by client", req_id)
+        if user_sub is not None:
+            await _download_rate.refund(user_sub)
         raise
     except Exception as e:
         logger.exception("[%s] unexpected error", req_id)
+        if user_sub is not None:
+            await _download_rate.refund(user_sub)
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error (ref: {req_id}).",
