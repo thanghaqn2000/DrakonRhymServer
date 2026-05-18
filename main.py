@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,9 +17,29 @@ from starlette.background import BackgroundTask
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("drakonrhym")
 
-MAX_CONCURRENT = int(os.getenv("DRAKON_MAX_CONCURRENT", "2"))
-YT_DLP_TIMEOUT = int(os.getenv("DRAKON_YT_DLP_TIMEOUT", "300"))
-FFMPEG_TIMEOUT = int(os.getenv("DRAKON_FFMPEG_TIMEOUT", "600"))
+
+def _positive_int_env(name: str, default: str) -> int:
+    raw = os.getenv(name, default)
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from e
+    if value < 1:
+        raise RuntimeError(f"{name} must be >= 1, got {value}")
+    return value
+
+
+def _origins_env(name: str, default: str) -> list[str]:
+    raw = os.getenv(name, default).strip()
+    if not raw:
+        return []
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+MAX_CONCURRENT = _positive_int_env("DRAKON_MAX_CONCURRENT", "2")
+YT_DLP_TIMEOUT = _positive_int_env("DRAKON_YT_DLP_TIMEOUT", "300")
+FFMPEG_TIMEOUT = _positive_int_env("DRAKON_FFMPEG_TIMEOUT", "600")
+ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -33,7 +54,7 @@ app = FastAPI(title="DrakonRhymServer", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -172,8 +193,9 @@ async def download(
             detail="Invalid URL — only YouTube domains are accepted.",
         )
 
-    # Match the extension's slider: clamp to step 0.1.
-    pitch = round(pitch * 10) / 10
+    # Match the extension's slider: clamp to step 0.1 using half-away-from-zero
+    # rounding (1.25 -> 1.3, not 1.2 as Python's banker's-rounding `round` gives).
+    pitch = float(Decimal(str(pitch)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
     pitch_factor = 2 ** (pitch / 12)
 
     req_id = uuid.uuid4().hex[:8]
@@ -203,7 +225,10 @@ async def download(
         raise
     except Exception as e:
         logger.exception("[%s] unexpected error", req_id)
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error (ref: {req_id}).",
+        ) from e
     finally:
         if not delivered:
             _cleanup(workdir)

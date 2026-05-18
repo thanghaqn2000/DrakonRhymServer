@@ -62,12 +62,15 @@ docker run --rm -p 8000:8000 drakonrhym-server
 
 Environment variables (all optional):
 
-| Variable                    | Default | Description                                  |
-|-----------------------------|---------|----------------------------------------------|
-| `PORT`                      | `8000`  | Bind port when running via `python main.py`  |
-| `DRAKON_MAX_CONCURRENT`     | `2`     | Max concurrent `/download` requests          |
-| `DRAKON_YT_DLP_TIMEOUT`     | `300`   | `yt-dlp` timeout (seconds) — returns 504     |
-| `DRAKON_FFMPEG_TIMEOUT`     | `600`   | `ffmpeg` timeout (seconds) — returns 504     |
+| Variable                    | Default | Description                                                            |
+|-----------------------------|---------|------------------------------------------------------------------------|
+| `PORT`                      | `8000`  | Bind port when running via `python main.py`                            |
+| `DRAKON_MAX_CONCURRENT`     | `2`     | Max concurrent `/download` requests (must be ≥ 1)                      |
+| `DRAKON_YT_DLP_TIMEOUT`     | `300`   | `yt-dlp` timeout (seconds, must be ≥ 1) — returns 504 on timeout       |
+| `DRAKON_FFMPEG_TIMEOUT`     | `600`   | `ffmpeg` timeout (seconds, must be ≥ 1) — returns 504 on timeout       |
+| `DRAKON_ALLOWED_ORIGINS`    | `*`     | Comma-separated CORS origins. Use explicit origins in production.      |
+
+Invalid values for the numeric vars (zero, negative, non-integer) cause the server to fail at startup with a clear error rather than silently misbehaving.
 
 ## Notes
 
