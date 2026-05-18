@@ -1,0 +1,1133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DrakonRhym — Downloading audio</title>
+  <link rel="stylesheet" href="/assets/colors_and_type.css">
+  <style>
+    body { background: var(--color-canvas); min-height: 100vh; }
+    a { text-decoration: none; }
+
+    /* ---------------- NAV ---------------- */
+    .dr-nav {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(245, 245, 245, 0.82);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--color-hairline);
+    }
+    .dr-nav-inner {
+      max-width: var(--container-max); margin: 0 auto;
+      height: var(--nav-height); padding: 0 24px;
+      display: flex; align-items: center; gap: 40px;
+    }
+    .dr-brand { display: flex; align-items: center; gap: 10px; }
+    .dr-brand-mark {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: var(--color-ink); color: var(--color-on-primary);
+      display: inline-flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .dr-brand-mark svg { width: 12px; height: 12px; }
+    .dr-brand-word {
+      font-family: var(--font-display); font-weight: 300;
+      font-size: 20px; letter-spacing: -0.4px; color: var(--color-ink);
+    }
+    .dr-nav-links { display: flex; gap: 28px; flex: 1; }
+    .dr-nav-links a {
+      font-family: var(--font-body); font-size: 14px; font-weight: 500;
+      color: var(--color-ink);
+    }
+    .dr-nav-links a:hover { opacity: 0.55; }
+    .dr-nav-actions { display: flex; align-items: center; gap: 14px; }
+
+    /* ---------------- STAGE ---------------- */
+    .dl-stage {
+      position: relative;
+      min-height: calc(100vh - var(--nav-height));
+      padding: 64px 24px 96px;
+      overflow: hidden;
+      display: flex; align-items: flex-start; justify-content: center;
+    }
+    .dl-orb {
+      position: absolute; border-radius: 50%;
+      filter: blur(100px); pointer-events: none;
+    }
+    .dl-orb-1 {
+      width: 600px; height: 600px;
+      top: -200px; left: 50%; transform: translateX(-50%);
+      background: radial-gradient(circle, var(--color-gradient-sky), transparent 65%);
+      opacity: 0.45;
+    }
+    .dl-orb-2 {
+      width: 460px; height: 460px;
+      bottom: -120px; right: -80px;
+      background: radial-gradient(circle, var(--color-gradient-mint), transparent 65%);
+      opacity: 0.4;
+      transition: opacity 600ms cubic-bezier(0.22,1,0.36,1),
+                  background 600ms cubic-bezier(0.22,1,0.36,1);
+    }
+    .dl-stage.is-ready .dl-orb-2 {
+      opacity: 0.55;
+      background: radial-gradient(circle, var(--color-gradient-mint), transparent 60%);
+    }
+
+    .dl-wrap {
+      position: relative; z-index: 2;
+      width: 100%; max-width: 640px;
+    }
+
+    /* breadcrumb / source */
+    .dl-source-bar {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      margin-bottom: 28px;
+      font-family: var(--font-body);
+      font-size: 12px; font-weight: 600; letter-spacing: 0.96px;
+      text-transform: uppercase;
+      color: var(--color-muted);
+    }
+    .dl-source-bar::before,
+    .dl-source-bar::after {
+      content: ""; width: 28px; height: 1px;
+      background: var(--color-hairline-strong);
+    }
+    .dl-source-icon {
+      width: 12px; height: 12px; flex-shrink: 0;
+    }
+
+    /* ---------------- CARD ---------------- */
+    .dl-card {
+      background: var(--color-surface-card);
+      border: 1px solid var(--color-hairline);
+      border-radius: var(--radius-xxl);
+      box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 24px 60px rgba(12,10,9,0.05);
+      overflow: hidden;
+    }
+
+    /* thumbnail */
+    .dl-thumb {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      background: linear-gradient(135deg, #1c1917 0%, #292524 100%);
+      overflow: hidden;
+    }
+    .dl-thumb-art {
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(at 30% 40%, rgba(168,200,232,0.35), transparent 50%),
+        radial-gradient(at 75% 60%, rgba(244,197,168,0.30), transparent 55%),
+        radial-gradient(at 50% 100%, rgba(200,184,224,0.30), transparent 60%);
+      filter: blur(40px);
+      transition: opacity 400ms ease;
+    }
+    .dl-thumb-img {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      opacity: 0;
+      transition: opacity 400ms ease;
+    }
+    .dl-thumb-img.is-loaded { opacity: 1; }
+    .dl-thumb-img.is-loaded ~ .dl-thumb-art { opacity: 0; }
+    .dl-thumb-scrim {
+      position: absolute; inset: 0;
+      background: linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,0) 70%, rgba(0,0,0,0.35) 100%);
+      pointer-events: none;
+    }
+    .dl-thumb-frame {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    /* abstract waveform glyph on the thumbnail */
+    .dl-thumb-wave {
+      display: flex; align-items: center; gap: 4px;
+      height: 56px;
+      opacity: 0.92;
+    }
+    .dl-thumb-wave i {
+      display: block; width: 3px;
+      background: rgba(255,255,255,0.85);
+      border-radius: 2px;
+    }
+    .dl-thumb-badge {
+      position: absolute; top: 16px; left: 16px;
+      display: inline-flex; align-items: center; gap: 8px;
+      background: rgba(12,10,9,0.6);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.92);
+      font-family: var(--font-body);
+      font-size: 11px; font-weight: 600; letter-spacing: 0.96px;
+      text-transform: uppercase;
+      padding: 6px 11px;
+      border-radius: var(--radius-pill);
+    }
+    .dl-thumb-badge-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #ff5050;
+    }
+    .dl-thumb-duration {
+      position: absolute; bottom: 16px; right: 16px;
+      font-family: var(--font-body);
+      font-size: 12px; font-weight: 500; letter-spacing: 0.1px;
+      color: rgba(255,255,255,0.92);
+      background: rgba(12,10,9,0.7);
+      padding: 4px 8px; border-radius: var(--radius-sm);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* meta */
+    .dl-meta { padding: 28px 32px 0; }
+    .dl-title {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-size: clamp(24px, 3vw, 30px);
+      line-height: 1.18;
+      letter-spacing: -0.4px;
+      color: var(--color-ink);
+      margin: 0 0 10px;
+      text-wrap: balance;
+    }
+    .dl-title em { font-style: italic; }
+    .dl-meta-row {
+      display: flex; flex-wrap: wrap; align-items: center;
+      gap: 12px;
+      font-family: var(--font-body);
+      font-size: 13px;
+      color: var(--color-muted);
+      letter-spacing: 0.16px;
+    }
+    .dl-meta-row > span:not(.dl-dot) { color: var(--color-body); }
+    .dl-meta-row .dl-channel { color: var(--color-ink); font-weight: 500; }
+    .dl-dot {
+      width: 3px; height: 3px; border-radius: 50%;
+      background: var(--color-muted-soft);
+    }
+    .dl-url {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      color: var(--color-muted);
+      letter-spacing: 0;
+      margin-top: 14px;
+      padding: 6px 10px;
+      background: var(--color-surface-strong);
+      border-radius: var(--radius-sm);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 100%;
+    }
+
+    /* divider */
+    .dl-divide {
+      height: 1px; background: var(--color-hairline-soft);
+      margin: 28px 32px;
+    }
+
+    /* ---------------- PROGRESS BLOCK ---------------- */
+    .dl-progress-block {
+      padding: 0 32px 32px;
+      display: grid;
+      grid-template-columns: 148px 1fr;
+      gap: 28px;
+      align-items: center;
+    }
+
+    /* circular ring */
+    .dl-ring {
+      position: relative;
+      width: 148px; height: 148px;
+      flex-shrink: 0;
+    }
+    .dl-ring svg {
+      width: 100%; height: 100%;
+      transform: rotate(-90deg);
+    }
+    .dl-ring-track {
+      fill: none;
+      stroke: var(--color-hairline);
+      stroke-width: 2.5;
+    }
+    .dl-ring-fill {
+      fill: none;
+      stroke: var(--color-ink);
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-dasharray: 0 999;
+      transition: stroke-dasharray 360ms cubic-bezier(0.22, 1, 0.36, 1),
+                  stroke 400ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .dl-stage.is-ready .dl-ring-fill {
+      stroke: var(--color-semantic-success);
+    }
+    .dl-ring-center {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 2px;
+    }
+    .dl-ring-num {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-size: 42px; line-height: 1;
+      letter-spacing: -1.4px;
+      color: var(--color-ink);
+      font-variant-numeric: tabular-nums;
+    }
+    .dl-ring-num small {
+      font-family: var(--font-body);
+      font-size: 16px; font-weight: 400;
+      color: var(--color-muted);
+      letter-spacing: 0.16px;
+      margin-left: 2px;
+    }
+    .dl-ring-label {
+      font-family: var(--font-body);
+      font-size: 10px; font-weight: 600; letter-spacing: 0.96px;
+      text-transform: uppercase;
+      color: var(--color-muted);
+    }
+    /* check icon shown when done */
+    .dl-ring-check {
+      position: absolute; inset: 0;
+      display: none;
+      align-items: center; justify-content: center;
+    }
+    .dl-ring-check svg {
+      width: 56px; height: 56px;
+      color: var(--color-semantic-success);
+      transform: none;
+    }
+    .dl-stage.is-ready .dl-ring-center { display: none; }
+    .dl-stage.is-ready .dl-ring-check { display: flex; }
+
+    /* status side */
+    .dl-status { display: flex; flex-direction: column; gap: 14px; }
+    .dl-status-head {
+      font-family: var(--font-display); font-weight: 300;
+      font-size: 24px; line-height: 1.2; letter-spacing: -0.3px;
+      color: var(--color-ink);
+      margin: 0;
+      transition: color 240ms ease;
+    }
+    .dl-status-head em { font-style: italic; }
+    .dl-status-sub {
+      font-family: var(--font-body);
+      font-size: 13px; line-height: 1.5; letter-spacing: 0.15px;
+      color: var(--color-body);
+      margin: 0;
+    }
+
+    /* tiny telemetry row */
+    .dl-telemetry {
+      display: flex; align-items: center; gap: 16px;
+      font-family: var(--font-body);
+      font-size: 12px; color: var(--color-muted); letter-spacing: 0.16px;
+    }
+    .dl-tele {
+      display: inline-flex; align-items: baseline; gap: 6px;
+    }
+    .dl-tele-num {
+      color: var(--color-ink); font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .dl-stage.is-ready .dl-telemetry { display: none; }
+
+    /* stage steps (mini log) */
+    .dl-stages {
+      margin-top: 4px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .dl-step-row {
+      display: flex; align-items: center; gap: 10px;
+      font-family: var(--font-body);
+      font-size: 12px; letter-spacing: 0.15px;
+      color: var(--color-muted-soft);
+      transition: color 240ms ease;
+    }
+    .dl-step-row.is-active { color: var(--color-ink); }
+    .dl-step-row.is-done { color: var(--color-muted); }
+    .dl-step-dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 1.5px solid var(--color-hairline-strong);
+      background: var(--color-canvas);
+      display: inline-flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: all 240ms ease;
+    }
+    .dl-step-row.is-active .dl-step-dot {
+      border-color: var(--color-ink);
+      background: var(--color-surface-card);
+      position: relative;
+    }
+    .dl-step-row.is-active .dl-step-dot::after {
+      content: ""; width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--color-ink);
+      animation: dl-pulse 1.4s cubic-bezier(0.22,1,0.36,1) infinite;
+    }
+    .dl-step-row.is-done .dl-step-dot {
+      background: var(--color-ink);
+      border-color: var(--color-ink);
+      color: var(--color-on-primary);
+    }
+    .dl-step-row.is-done .dl-step-dot svg {
+      width: 8px; height: 8px;
+    }
+    .dl-step-time {
+      margin-left: auto;
+      font-variant-numeric: tabular-nums;
+      font-size: 11px;
+    }
+    @keyframes dl-pulse {
+      0%   { transform: scale(1); opacity: 1; }
+      60%  { transform: scale(1.6); opacity: 0.3; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+
+    /* ---------------- READY BAR (visible when done) ---------------- */
+    .dl-ready-bar {
+      padding: 24px 32px 28px;
+      border-top: 1px solid var(--color-hairline-soft);
+      display: none;
+      flex-direction: column; gap: 18px;
+    }
+    .dl-stage.is-ready .dl-ready-bar { display: flex; }
+
+    .dl-formats {
+      display: flex; align-items: center; gap: 12px;
+      flex-wrap: wrap;
+    }
+    .dl-formats-label {
+      font-family: var(--font-body);
+      font-size: 11px; font-weight: 600; letter-spacing: 0.96px;
+      text-transform: uppercase; color: var(--color-muted);
+    }
+    .dl-format {
+      font-family: var(--font-body);
+      font-size: 12px; font-weight: 500;
+      color: var(--color-body);
+      background: transparent;
+      border: 1px solid var(--color-hairline);
+      border-radius: var(--radius-pill);
+      padding: 7px 14px;
+      cursor: pointer;
+      letter-spacing: 0.1px;
+      transition: all 150ms ease;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .dl-format:hover { background: rgba(12,10,9,0.04); }
+    .dl-format.is-active {
+      background: var(--color-ink); color: var(--color-on-primary);
+      border-color: transparent;
+    }
+    .dl-format-size {
+      font-size: 11px; opacity: 0.7;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .dl-actions {
+      display: flex; align-items: center; gap: 12px;
+    }
+    .dl-save {
+      flex: 1;
+      display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+      height: 52px;
+      background: var(--color-primary);
+      color: var(--color-on-primary);
+      border: 1px solid transparent;
+      border-radius: var(--radius-pill);
+      font-family: var(--font-body);
+      font-size: 15px; font-weight: 500;
+      cursor: pointer;
+      transition: background 180ms cubic-bezier(0.22,1,0.36,1);
+    }
+    .dl-save:hover { background: var(--color-primary-active); }
+    .dl-save svg { width: 16px; height: 16px; }
+    .dl-save-name {
+      font-variant-numeric: tabular-nums;
+      opacity: 0.7; font-weight: 400;
+    }
+    .dl-secondary {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 52px; height: 52px;
+      background: transparent;
+      border: 1px solid var(--color-hairline-strong);
+      border-radius: var(--radius-pill);
+      color: var(--color-ink);
+      cursor: pointer;
+      transition: background 150ms ease;
+    }
+    .dl-secondary:hover { background: rgba(12,10,9,0.04); }
+    .dl-secondary svg { width: 16px; height: 16px; }
+
+    .dl-after {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 12px 14px;
+      background: var(--color-canvas-soft);
+      border: 1px solid var(--color-hairline-soft);
+      border-radius: var(--radius-lg);
+      font-family: var(--font-body);
+      font-size: 12px; line-height: 1.5;
+      color: var(--color-body); letter-spacing: 0.15px;
+    }
+    .dl-after svg {
+      width: 14px; height: 14px; flex-shrink: 0;
+      margin-top: 2px;
+      color: var(--color-ink);
+    }
+    .dl-after a {
+      color: var(--color-ink); font-weight: 500;
+      text-decoration: underline;
+      text-decoration-color: var(--color-hairline-strong);
+      text-underline-offset: 3px;
+    }
+
+    /* below-card footer note */
+    .dl-foot-note {
+      margin-top: 20px;
+      text-align: center;
+      font-family: var(--font-body);
+      font-size: 12px; color: var(--color-muted);
+      letter-spacing: 0.15px;
+    }
+    .dl-foot-note a {
+      color: var(--color-ink); font-weight: 500;
+    }
+    .dl-foot-note a:hover { opacity: 0.6; }
+
+    /* cancel button while in progress */
+    .dl-cancel {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: transparent; border: 0;
+      font-family: var(--font-body); font-size: 12px; font-weight: 500;
+      color: var(--color-muted);
+      cursor: pointer;
+      padding: 0;
+      letter-spacing: 0.15px;
+    }
+    .dl-cancel:hover { color: var(--color-ink); }
+    .dl-stage.is-ready .dl-cancel,
+    .dl-stage.is-error .dl-cancel { display: none; }
+
+    /* error state */
+    .dl-stage.is-error .dl-ring-fill { stroke: var(--color-semantic-error); }
+    .dl-stage.is-error .dl-status-head { color: var(--color-semantic-error); }
+    .dl-stage.is-error .dl-telemetry { display: none; }
+    .dl-stage.is-error .dl-ready-bar { display: flex; }
+    .dl-stage.is-error .dl-save { display: none; }
+    .dl-stage.is-error .dl-formats { display: none; }
+    .dl-stage.is-error .dl-after { display: none; }
+
+    /* disabled format chip */
+    .dl-format[disabled] {
+      cursor: not-allowed;
+      opacity: 0.4;
+    }
+    .dl-format[disabled]:hover { background: transparent; }
+
+    /* responsive */
+    @media (max-width: 640px) {
+      .dl-nav-links { display: none; }
+      .dl-progress-block {
+        grid-template-columns: 1fr;
+        justify-items: center; text-align: center;
+        gap: 22px;
+      }
+      .dl-ring { width: 128px; height: 128px; }
+      .dl-meta, .dl-divide, .dl-ready-bar { padding-left: 22px; padding-right: 22px; }
+      .dl-progress-block { padding: 0 22px 28px; }
+      .dl-status { align-items: center; }
+      .dl-telemetry { justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <header class="dr-nav" data-screen-label="Nav">
+    <div class="dr-nav-inner">
+      <a class="dr-brand" href="/">
+        <span class="dr-brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M5 12 L5 12"/><path d="M9 8 L9 16"/><path d="M13 5 L13 19"/><path d="M17 9 L17 15"/><path d="M21 12 L21 12"/>
+          </svg>
+        </span>
+        <span class="dr-brand-word">DrakonRhym</span>
+      </a>
+      <nav class="dr-nav-links">
+        <a href="/">Studio</a>
+        <a href="#">Effects</a>
+        <a href="/download">Downloads</a>
+        <a href="#">Pricing</a>
+        <a href="#">Docs</a>
+      </nav>
+      <div class="dr-nav-actions">
+        <a href="/" style="font-family: var(--font-body); font-size: 14px; font-weight: 500; color: var(--color-ink);">Sign in</a>
+        <button class="el-btn el-btn-primary">Try free</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- STAGE -->
+  <main class="dl-stage" id="dl-stage" data-screen-label="Download">
+    <div class="dl-orb dl-orb-1"></div>
+    <div class="dl-orb dl-orb-2"></div>
+
+    <div class="dl-wrap">
+
+      <!-- source kicker -->
+      <div class="dl-source-bar">
+        <svg class="dl-source-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a2.99 2.99 0 0 0-2.108-2.117C19.505 3.5 12 3.5 12 3.5s-7.505 0-9.39.569a2.99 2.99 0 0 0-2.108 2.117A31.4 31.4 0 0 0 0 12a31.4 31.4 0 0 0 .502 5.814 2.99 2.99 0 0 0 2.108 2.117C4.495 20.5 12 20.5 12 20.5s7.505 0 9.39-.569a2.99 2.99 0 0 0 2.108-2.117A31.4 31.4 0 0 0 24 12a31.4 31.4 0 0 0-.502-5.814zM9.75 15.568V8.432L15.818 12 9.75 15.568z"/></svg>
+        Sent from extension
+      </div>
+
+      <!-- card -->
+      <article class="dl-card">
+
+        <!-- thumbnail -->
+        <div class="dl-thumb">
+          <img class="dl-thumb-img" id="dl-thumb-img" alt="" referrerpolicy="no-referrer" />
+          <div class="dl-thumb-art"></div>
+          <div class="dl-thumb-frame">
+            <div class="dl-thumb-wave" id="dl-thumb-wave"></div>
+          </div>
+          <div class="dl-thumb-scrim"></div>
+          <span class="dl-thumb-badge">
+            <span class="dl-thumb-badge-dot"></span>
+            youtube · audio only
+          </span>
+          <span class="dl-thumb-duration" id="dl-duration">—:—</span>
+        </div>
+
+        <!-- meta -->
+        <div class="dl-meta">
+          <h1 class="dl-title" id="dl-title">Loading…</h1>
+          <div class="dl-meta-row">
+            <span class="dl-channel" id="dl-channel">—</span>
+            <span class="dl-dot"></span>
+            <span id="dl-meta-duration">—</span>
+            <span class="dl-dot"></span>
+            <span id="dl-meta-quality">192 kbps stereo</span>
+            <span class="dl-dot"></span>
+            <span id="dl-meta-views">—</span>
+          </div>
+          <div class="dl-url" id="dl-url">—</div>
+        </div>
+
+        <div class="dl-divide"></div>
+
+        <!-- progress / ready block -->
+        <div class="dl-progress-block">
+
+          <!-- ring -->
+          <div class="dl-ring" aria-label="Download progress">
+            <svg viewBox="0 0 100 100">
+              <circle class="dl-ring-track" cx="50" cy="50" r="46"></circle>
+              <circle class="dl-ring-fill"  cx="50" cy="50" r="46" id="dl-ring-fill"></circle>
+            </svg>
+            <div class="dl-ring-center" id="dl-ring-center">
+              <div class="dl-ring-num"><span id="dl-pct">0</span><small>%</small></div>
+              <div class="dl-ring-label" id="dl-ring-label">Working</div>
+            </div>
+            <div class="dl-ring-check" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <polyline points="8 12.5 11 15.5 16.5 9.5"/>
+              </svg>
+            </div>
+          </div>
+
+          <!-- status -->
+          <div class="dl-status">
+            <h2 class="dl-status-head" id="dl-status-head">Reaching for YouTube…</h2>
+            <p class="dl-status-sub" id="dl-status-sub">
+              We're opening a quiet pipe to the stream. This usually takes a moment.
+            </p>
+
+            <div class="dl-telemetry" id="dl-telemetry">
+              <span class="dl-tele"><span class="dl-tele-num" id="dl-speed">0.0</span> MB/s</span>
+              <span class="dl-dot"></span>
+              <span class="dl-tele"><span class="dl-tele-num" id="dl-eta">— </span> remaining</span>
+              <span class="dl-dot"></span>
+              <button class="dl-cancel" id="dl-cancel" type="button">Cancel</button>
+            </div>
+
+            <div class="dl-stages">
+              <div class="dl-step-row is-active" data-step="0">
+                <span class="dl-step-dot"></span>
+                <span>Connecting to source</span>
+                <span class="dl-step-time" id="dl-time-0">—</span>
+              </div>
+              <div class="dl-step-row" data-step="1">
+                <span class="dl-step-dot"></span>
+                <span>Fetching audio stream</span>
+                <span class="dl-step-time" id="dl-time-1">—</span>
+              </div>
+              <div class="dl-step-row" data-step="2">
+                <span class="dl-step-dot"></span>
+                <span>Extracting · 192 kbps MP3</span>
+                <span class="dl-step-time" id="dl-time-2">—</span>
+              </div>
+              <div class="dl-step-row" data-step="3">
+                <span class="dl-step-dot"></span>
+                <span>Finalising file</span>
+                <span class="dl-step-time" id="dl-time-3">—</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- ready bar (revealed when complete) -->
+        <div class="dl-ready-bar" id="dl-ready">
+          <div class="dl-formats">
+            <span class="dl-formats-label">Save as</span>
+            <button class="dl-format is-active" data-fmt="mp3">MP3 192 <span class="dl-format-size">6.0 MB</span></button>
+            <button class="dl-format" data-fmt="m4a">M4A <span class="dl-format-size">5.4 MB</span></button>
+            <button class="dl-format" data-fmt="wav">WAV <span class="dl-format-size">46.1 MB</span></button>
+            <button class="dl-format" data-fmt="flac">FLAC <span class="dl-format-size">28.7 MB</span></button>
+          </div>
+
+          <div class="dl-actions">
+            <button class="dl-save" id="dl-save" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Download</span>
+              <span class="dl-save-name" id="dl-save-name">slow-hours.mp3</span>
+            </button>
+            <button class="dl-secondary" id="dl-restart" type="button" aria-label="Restart download">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"/>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="dl-after">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3v4zM3 19a2 2 0 0 0 2 2h1v-6H3v4z"/></svg>
+            <span>
+              The file is ready on our side. <a href="/">Open it in the Studio</a>
+              to denoise, separate stems, or master before exporting.
+            </span>
+          </div>
+        </div>
+
+      </article>
+
+      <p class="dl-foot-note">
+        Files are processed in-memory and dropped after 30 minutes.
+        <a href="#">Read our handling policy →</a>
+      </p>
+
+    </div>
+  </main>
+
+  <script>
+    // ---------- thumbnail waveform glyph ----------
+    (function() {
+      const wave = document.getElementById('dl-thumb-wave');
+      if (!wave) return;
+      const BARS = 28;
+      for (let i = 0; i < BARS; i++) {
+        const t = i / BARS;
+        const env = Math.sin(t * Math.PI) * 0.85 + 0.15;
+        const wob = Math.sin(i * 1.7) * 0.25 + Math.sin(i * 0.6 + 1.2) * 0.35;
+        const h = Math.max(6, Math.min(56, (env + Math.abs(wob) * 0.4) * 56));
+        const bar = document.createElement('i');
+        bar.style.height = h + 'px';
+        wave.appendChild(bar);
+      }
+    })();
+
+    // ---------- driver: read params, fetch metadata + audio, drive UI ----------
+    (function() {
+      const params   = new URLSearchParams(window.location.search);
+      const url      = params.get('url');
+      const pitchRaw = params.get('pitch');
+      const pitch    = Number.isFinite(parseFloat(pitchRaw)) ? parseFloat(pitchRaw) : 0;
+
+      // Always show URL + pitch chip immediately (these come from the extension).
+      if (url) document.getElementById('dl-url').textContent = url;
+      {
+        const metaRow = document.querySelector('.dl-meta-row');
+        const dot = document.createElement('span'); dot.className = 'dl-dot';
+        const chip = document.createElement('span');
+        chip.className = 'dl-channel';
+        chip.textContent = 'pitch ' + (pitch >= 0 ? '+' : '') + pitch.toFixed(1) + ' st';
+        metaRow.appendChild(dot);
+        metaRow.appendChild(chip);
+      }
+
+      // Holder for video metadata once fetched.
+      let videoTitle = null;       // raw video title from YouTube
+      let videoDuration = null;    // seconds (number)
+
+      function fmtDurationLong(sec) {
+        if (!sec) return '—';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return m + ' min ' + (s < 10 ? '0' + s : s) + ' sec';
+      }
+      function fmtDurationShort(sec) {
+        if (!sec) return '—:—';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return (m < 10 ? '0' + m : m) + ':' + (s < 10 ? '0' + s : s);
+      }
+      function fmtViews(n) {
+        if (!n) return '—';
+        if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M views';
+        if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'k views';
+        return n + ' views';
+      }
+
+      async function loadMetadata() {
+        if (!url) return;
+        try {
+          const r = await fetch('/api/metadata?url=' + encodeURIComponent(url));
+          if (!r.ok) return;
+          const m = await r.json();
+          videoTitle = m.title || null;
+          videoDuration = m.duration || null;
+          if (m.title)     document.getElementById('dl-title').textContent = m.title;
+          if (m.channel)   document.getElementById('dl-channel').textContent = m.channel;
+          if (m.duration) {
+            document.getElementById('dl-meta-duration').textContent = fmtDurationLong(m.duration);
+            document.getElementById('dl-duration').textContent = m.duration_string || fmtDurationShort(m.duration);
+          }
+          if (m.view_count) document.getElementById('dl-meta-views').textContent = fmtViews(m.view_count);
+          if (m.thumbnail) {
+            const img = document.getElementById('dl-thumb-img');
+            img.onload = () => img.classList.add('is-loaded');
+            img.src = m.thumbnail;
+          }
+        } catch (_) {
+          // Soft fail — keep placeholders, the download flow still works.
+        }
+      }
+      // Fire and forget; we don't block the download on this.
+      loadMetadata();
+
+      // ---- element handles ----
+      const stage     = document.getElementById('dl-stage');
+      const pctEl     = document.getElementById('dl-pct');
+      const ringFill  = document.getElementById('dl-ring-fill');
+      const ringLabel = document.getElementById('dl-ring-label');
+      const head      = document.getElementById('dl-status-head');
+      const sub       = document.getElementById('dl-status-sub');
+      const speedEl   = document.getElementById('dl-speed');
+      const etaEl     = document.getElementById('dl-eta');
+      const cancelBtn = document.getElementById('dl-cancel');
+      const restartBtn= document.getElementById('dl-restart');
+      const saveBtn   = document.getElementById('dl-save');
+      const saveName  = document.getElementById('dl-save-name');
+
+      const C = 2 * Math.PI * 46;
+
+      // ---- helpers ----
+      function setRing(p) {
+        const dash = (p / 100) * C;
+        ringFill.setAttribute('stroke-dasharray', dash + ' ' + (C - dash));
+      }
+      function updatePct(p) {
+        pctEl.textContent = Math.floor(p);
+        setRing(p);
+      }
+      function fmtElapsed(ms) {
+        const s = ms / 1000;
+        return s < 10 ? s.toFixed(1) + 's' : Math.round(s) + 's';
+      }
+      function fmtEta(ms) {
+        if (!isFinite(ms) || ms <= 0) return '—';
+        const s = Math.round(ms / 1000);
+        return s >= 60 ? (Math.floor(s/60) + 'm ' + (s%60) + 's') : (s + 's');
+      }
+      function setHead(headHtml, subText) {
+        head.innerHTML = headHtml;
+        sub.textContent = subText;
+      }
+      function checkSvg() {
+        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+      }
+      function setStep(idx, label) {
+        document.querySelectorAll('.dl-step-row').forEach((row, i) => {
+          row.classList.remove('is-active', 'is-done');
+          const dot = row.querySelector('.dl-step-dot');
+          if (i < idx) {
+            row.classList.add('is-done');
+            dot.innerHTML = checkSvg();
+          } else if (i === idx) {
+            row.classList.add('is-active');
+            dot.innerHTML = '';
+          } else {
+            dot.innerHTML = '';
+          }
+        });
+        if (label) ringLabel.textContent = label;
+      }
+      function markAllStepsDone() {
+        document.querySelectorAll('.dl-step-row').forEach((row) => {
+          row.classList.remove('is-active');
+          row.classList.add('is-done');
+          const dot = row.querySelector('.dl-step-dot');
+          if (!dot.querySelector('svg')) dot.innerHTML = checkSvg();
+        });
+      }
+      function resetSteps() {
+        document.querySelectorAll('.dl-step-row').forEach((row, i) => {
+          row.classList.remove('is-active', 'is-done');
+          row.querySelector('.dl-step-dot').innerHTML = '';
+          const timeEl = document.getElementById('dl-time-' + i);
+          if (timeEl) timeEl.textContent = '—';
+        });
+      }
+
+      // ---- state ----
+      let abortController = null;
+      let blobUrl = null;
+      let filename = 'drakonrhym.mp3';
+      saveName.textContent = filename;
+
+      function sanitizeForFilename(s) {
+        if (!s) return '';
+        return s.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, ' ').trim();
+      }
+      function buildFilename() {
+        const base = sanitizeForFilename(videoTitle) || 'drakonrhym';
+        return base + ' - pitch = ' + pitch.toFixed(1) + '.mp3';
+      }
+
+      function showError(title, detail) {
+        stage.classList.remove('is-ready');
+        stage.classList.add('is-error');
+        ringLabel.textContent = 'Error';
+        head.textContent = title;
+        sub.textContent = detail;
+        speedEl.textContent = '0.0';
+        etaEl.textContent = '—';
+      }
+
+      async function startDownload() {
+        if (!url) {
+          showError('Missing URL.', 'Open this page from the DrakonRhym browser extension — it supplies the source link.');
+          return;
+        }
+
+        stage.classList.remove('is-ready', 'is-error');
+        if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+        resetSteps();
+        updatePct(0);
+        setStep(0, 'Connecting');
+        setHead('Reaching for YouTube…', "We're opening a quiet pipe to the stream. This usually takes a moment.");
+        speedEl.textContent = '0.0';
+        etaEl.textContent = '—';
+
+        const startedAt = performance.now();
+        const stepStarts = [startedAt, null, null, null];
+
+        function closeStep(idx) {
+          const row = document.querySelector('[data-step="' + idx + '"]');
+          if (!row) return;
+          row.classList.remove('is-active');
+          row.classList.add('is-done');
+          row.querySelector('.dl-step-dot').innerHTML = checkSvg();
+          const timeEl = document.getElementById('dl-time-' + idx);
+          if (timeEl && stepStarts[idx] != null) {
+            timeEl.textContent = fmtElapsed(performance.now() - stepStarts[idx]);
+          }
+        }
+        function openStep(idx, label) {
+          stepStarts[idx] = performance.now();
+          setStep(idx, label);
+        }
+
+        // -------- PHASE 1: server-side processing (no body bytes yet) --------
+        // The backend runs yt-dlp + ffmpeg synchronously and only starts streaming
+        // the response body after both finish. While we wait we cannot know the
+        // real progress, so we animate the ring smoothly from 0 → 75% across a
+        // time budget estimated from the video duration. Server processing is
+        // roughly download (~0.05x of video duration) + pitch shift (~0.1x).
+        const estimatedSec = Math.max(6, Math.min(90, (videoDuration || 180) * 0.18));
+        let phase1Running = true;
+
+        function phase1Loop() {
+          if (!phase1Running) return;
+          const elapsed = (performance.now() - startedAt) / 1000;
+          const x = Math.min(1, elapsed / estimatedSec);
+          // ease-out so it slows near 75% rather than hitting it abruptly
+          const eased = 1 - Math.pow(1 - x, 1.8);
+          const pct = eased * 75;
+          updatePct(pct);
+
+          // Move through synthetic step labels as we go.
+          if (pct > 18 && stepStarts[1] == null) {
+            closeStep(0); openStep(1, 'Streaming');
+            setHead('Fetching the audio…', 'Streaming the audio track from YouTube on our side.');
+          }
+          if (pct > 45 && stepStarts[2] == null) {
+            closeStep(1); openStep(2, 'Extracting');
+            setHead('Extracting <em>MP3</em>…', 'Pulling the audio out and applying your pitch shift with rubberband.');
+          }
+          if (pct > 65 && stepStarts[3] == null) {
+            closeStep(2); openStep(3, 'Wrapping');
+            setHead('Finalising file…', 'Re-encoding to MP3 and packaging it up.');
+          }
+          requestAnimationFrame(phase1Loop);
+        }
+        requestAnimationFrame(phase1Loop);
+
+        abortController = new AbortController();
+        const apiUrl = '/api/download?url=' + encodeURIComponent(url) + '&pitch=' + encodeURIComponent(pitch);
+
+        let response;
+        try {
+          response = await fetch(apiUrl, { signal: abortController.signal });
+        } catch (e) {
+          phase1Running = false;
+          if (e.name === 'AbortError') return;
+          showError('Network error.', 'Could not reach the server. Check your connection and try again.');
+          return;
+        }
+
+        if (!response.ok) {
+          phase1Running = false;
+          let msg = 'The server returned an error (' + response.status + ').';
+          try {
+            const data = await response.json();
+            if (data && typeof data.detail === 'string') msg = data.detail;
+            else if (data && Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg) msg = data.detail[0].msg;
+          } catch (_) { /* non-json body */ }
+          showError('Download failed.', msg);
+          return;
+        }
+
+        // -------- PHASE 2: response body is streaming — switch to real bytes --------
+        phase1Running = false;
+        const phase1End = Math.min(75, parseFloat(pctEl.textContent) || 0);
+        // Make sure all upstream "fake" steps are at least marked open before we close them.
+        for (let i = 0; i < 4; i++) if (stepStarts[i] == null) openStep(i, ['Connecting','Streaming','Extracting','Wrapping'][i]);
+
+        const totalStr = response.headers.get('Content-Length');
+        const total = totalStr ? parseInt(totalStr, 10) : 0;
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        let lastSampleAt = performance.now();
+        let lastReceived = 0;
+        let smoothedSpeed = 0;
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+
+            const now = performance.now();
+            const dtSec = (now - lastSampleAt) / 1000;
+            if (dtSec > 0.15) {
+              const inst = (received - lastReceived) / dtSec;
+              smoothedSpeed = smoothedSpeed === 0 ? inst : (smoothedSpeed * 0.7 + inst * 0.3);
+              speedEl.textContent = (smoothedSpeed / 1024 / 1024).toFixed(1);
+              if (total > 0) {
+                const remaining = total - received;
+                etaEl.textContent = fmtEta((remaining / Math.max(smoothedSpeed, 1)) * 1000);
+              } else {
+                etaEl.textContent = '—';
+              }
+              lastSampleAt = now;
+              lastReceived = received;
+            }
+
+            // Map bytes received to (phase1End .. 100). If Content-Length is missing,
+            // use an asymptote that gets close to 100 quickly.
+            let pct;
+            if (total > 0) {
+              pct = phase1End + (received / total) * (100 - phase1End);
+            } else {
+              pct = phase1End + (100 - phase1End) * (1 - Math.exp(-received / 1500000));
+            }
+            updatePct(pct);
+          }
+        } catch (e) {
+          if (e.name === 'AbortError') return;
+          showError('Stream interrupted.', 'The connection dropped while receiving the file. Click restart to try again.');
+          return;
+        }
+
+        // -------- Done. Finalise UI. --------
+        for (let i = 0; i < 4; i++) {
+          if (stepStarts[i] != null) closeStep(i);
+        }
+        markAllStepsDone();
+
+        const contentType = response.headers.get('Content-Type') || 'audio/mpeg';
+        const blob = new Blob(chunks, { type: contentType });
+        blobUrl = URL.createObjectURL(blob);
+
+        // Build filename from video title + pitch (per spec).
+        filename = buildFilename();
+        saveName.textContent = filename;
+
+        // Update active format size pill with the actual size we received.
+        const sizeMb = (blob.size / 1024 / 1024).toFixed(1);
+        const activeFormat = document.querySelector('.dl-format.is-active .dl-format-size');
+        if (activeFormat) activeFormat.textContent = sizeMb + ' MB';
+
+        updatePct(100);
+        setHead('Ready <em>to save</em>.', 'Your file is sitting in memory and waiting. Click Download to write it to disk.');
+        ringLabel.textContent = 'Ready';
+        stage.classList.add('is-ready');
+      }
+
+      // ---- wire interactions ----
+      cancelBtn.addEventListener('click', () => {
+        if (abortController) abortController.abort();
+        stage.classList.remove('is-ready', 'is-error');
+        head.textContent = 'Cancelled.';
+        sub.textContent = 'No file was saved. Click restart to try again.';
+        ringLabel.textContent = 'Stopped';
+        speedEl.textContent = '0.0';
+        etaEl.textContent = '—';
+      });
+
+      restartBtn.addEventListener('click', () => {
+        startDownload();
+      });
+
+      saveBtn.addEventListener('click', () => {
+        if (!blobUrl) return;
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Flash confirmation on the button.
+        const original = saveBtn.innerHTML;
+        saveBtn.innerHTML =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+          + '<span>Saved</span>';
+        saveBtn.style.background = 'var(--color-semantic-success)';
+        setTimeout(() => {
+          saveBtn.innerHTML = original;
+          saveBtn.style.background = '';
+        }, 1600);
+      });
+
+      // Only MP3 is produced by the backend right now; disable the rest.
+      document.querySelectorAll('.dl-format').forEach((btn) => {
+        if (btn.dataset.fmt === 'mp3') return;
+        btn.setAttribute('disabled', '');
+        btn.title = 'Coming soon';
+        btn.addEventListener('click', (e) => e.preventDefault());
+      });
+
+      // Kick off.
+      setRing(0);
+      startDownload();
+    })();
+  </script>
+</body>
+</html>

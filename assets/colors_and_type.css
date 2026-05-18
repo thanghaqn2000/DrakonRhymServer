@@ -1,0 +1,122 @@
+/* DrakonRhym — design tokens (colors, type, spacing, motion).
+   Used by HomePage.html and DownloadPage.html. */
+
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;1,9..144,300;1,9..144,400&family=Inter:wght@400;500;600;700&display=swap");
+
+:root {
+  /* -------- Colors -------- */
+  --color-canvas: #f5f5f4;
+  --color-canvas-soft: #efefee;
+  --color-surface-card: #ffffff;
+  --color-surface-strong: #ebebe9;
+
+  --color-ink: #0c0a09;
+  --color-on-primary: #fafaf9;
+  --color-body: #44403c;
+  --color-muted: #78716c;
+  --color-muted-soft: #a8a29e;
+
+  --color-hairline: rgba(12, 10, 9, 0.08);
+  --color-hairline-soft: rgba(12, 10, 9, 0.05);
+  --color-hairline-strong: rgba(12, 10, 9, 0.16);
+
+  --color-primary: #0c0a09;
+  --color-primary-active: #292524;
+
+  --color-semantic-success: #16a34a;
+  --color-semantic-warning: #d97706;
+  --color-semantic-error: #dc2626;
+
+  /* gradient hero orbs */
+  --color-gradient-sky: #a8c8e8;
+  --color-gradient-lavender: #c8b8e0;
+  --color-gradient-mint: #b8dcc4;
+  --color-gradient-peach: #f4c5a8;
+
+  /* -------- Typography -------- */
+  --font-display: "Fraunces", "Iowan Old Style", "Apple Garamond", Georgia, "Times New Roman", serif;
+  --font-body: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+
+  /* -------- Sizing -------- */
+  --container-max: 1200px;
+  --nav-height: 64px;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-xxl: 28px;
+  --radius-pill: 999px;
+}
+
+/* -------- Global reset -------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-body);
+  color: var(--color-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+body {
+  background: var(--color-canvas);
+}
+button {
+  font-family: inherit;
+  color: inherit;
+}
+
+/* -------- Buttons (.el-btn family) -------- */
+.el-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 20px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.el-btn:active { transform: translateY(0.5px); }
+.el-btn:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+}
+
+.el-btn-primary {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  border-color: transparent;
+}
+.el-btn-primary:hover { background: var(--color-primary-active); }
+
+.el-btn-outline {
+  background: transparent;
+  color: var(--color-ink);
+  border-color: var(--color-hairline-strong);
+}
+.el-btn-outline:hover {
+  background: rgba(12, 10, 9, 0.04);
+  border-color: var(--color-ink);
+}
+
+.el-btn-ghost {
+  background: transparent;
+  color: var(--color-ink);
+  border-color: transparent;
+}
+.el-btn-ghost:hover { background: rgba(12, 10, 9, 0.05); }
