@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -12,7 +13,10 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
+
+BASE_DIR = Path(__file__).resolve().parent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("drakonrhym")
@@ -172,12 +176,71 @@ def _cleanup(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+app.mount(
+    "/assets",
+    StaticFiles(directory=BASE_DIR / "assets"),
+    name="assets",
+)
+
+
+@app.get("/", include_in_schema=False)
+async def home_page() -> FileResponse:
+    return FileResponse(BASE_DIR / "HomePage.html", media_type="text/html")
+
+
+@app.get("/download", include_in_schema=False)
+async def download_page() -> FileResponse:
+    return FileResponse(BASE_DIR / "DownloadPage.html", media_type="text/html")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/download")
+@app.get("/api/metadata")
+async def metadata(url: str = Query(..., description="YouTube URL")):
+    if not _is_valid_youtube_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL — only YouTube domains are accepted.",
+        )
+
+    req_id = uuid.uuid4().hex[:8]
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--dump-single-json",
+        "--skip-download",
+        "--no-warnings",
+        "--socket-timeout",
+        "20",
+        "--no-playlist",
+        url,
+    ]
+    code, stdout, stderr = await _run_subprocess(cmd, 60, req_id, "yt-dlp-metadata")
+    if code != 0:
+        logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
+        raise HTTPException(status_code=400, detail="Could not read video metadata.")
+
+    try:
+        data = json.loads(stdout.decode())
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse video metadata.")
+
+    return {
+        "title": data.get("title"),
+        "channel": data.get("uploader") or data.get("channel"),
+        "duration": data.get("duration"),
+        "duration_string": data.get("duration_string"),
+        "thumbnail": data.get("thumbnail"),
+        "video_id": data.get("id"),
+        "view_count": data.get("view_count"),
+    }
+
+
+@app.get("/api/download")
 async def download(
     url: str = Query(..., description="YouTube URL to process"),
     pitch: float = Query(

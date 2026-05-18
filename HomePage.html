@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DrakonRhym — Audio, refined.</title>
+  <link rel="stylesheet" href="assets/colors_and_type.css">
+  <style>
+    body { background: var(--color-canvas); min-height: 100vh; }
+    a { text-decoration: none; }
+
+    /* ---------------- NAV ---------------- */
+    .dr-nav {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(245, 245, 245, 0.82);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--color-hairline);
+    }
+    .dr-nav-inner {
+      max-width: var(--container-max); margin: 0 auto;
+      height: var(--nav-height); padding: 0 24px;
+      display: flex; align-items: center; gap: 40px;
+    }
+    .dr-brand { display: flex; align-items: center; gap: 10px; }
+    .dr-brand-mark {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--color-ink);
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--color-on-primary);
+      flex-shrink: 0;
+    }
+    .dr-brand-mark svg { width: 12px; height: 12px; }
+    .dr-brand-word {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-size: 20px;
+      letter-spacing: -0.4px;
+      color: var(--color-ink);
+    }
+    .dr-nav-links { display: flex; gap: 28px; flex: 1; }
+    .dr-nav-links a {
+      font-family: var(--font-body); font-size: 14px; font-weight: 500;
+      color: var(--color-ink);
+    }
+    .dr-nav-links a:hover { opacity: 0.55; }
+    .dr-nav-actions { display: flex; align-items: center; gap: 14px; }
+    .dr-signin {
+      font-family: var(--font-body); font-size: 14px; font-weight: 500;
+      color: var(--color-ink);
+    }
+
+    /* ---------------- HERO ---------------- */
+    .dr-hero {
+      position: relative;
+      padding: 96px 24px 120px;
+      overflow: hidden;
+    }
+    .dr-hero-orb {
+      position: absolute; border-radius: 50%;
+      filter: blur(90px); pointer-events: none;
+    }
+    .dr-hero-orb-1 {
+      width: 620px; height: 620px;
+      top: -160px; left: 50%; transform: translateX(-50%);
+      background: radial-gradient(circle, var(--color-gradient-sky), transparent 65%);
+      opacity: 0.55;
+    }
+    .dr-hero-orb-2 {
+      width: 420px; height: 420px;
+      top: 180px; right: -60px;
+      background: radial-gradient(circle, var(--color-gradient-lavender), transparent 65%);
+      opacity: 0.45;
+    }
+    .dr-hero-orb-3 {
+      width: 380px; height: 380px;
+      top: 280px; left: -80px;
+      background: radial-gradient(circle, var(--color-gradient-mint), transparent 65%);
+      opacity: 0.4;
+    }
+    .dr-hero-inner {
+      position: relative; z-index: 2;
+      max-width: 880px; margin: 0 auto;
+      text-align: center;
+    }
+    .dr-kicker {
+      display: inline-flex; align-items: center; gap: 10px;
+      font-family: var(--font-body);
+      font-size: 12px; font-weight: 600; letter-spacing: 0.96px;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 28px;
+    }
+    .dr-kicker::before,
+    .dr-kicker::after {
+      content: ""; width: 28px; height: 1px;
+      background: var(--color-hairline-strong);
+    }
+    .dr-h1 {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-size: clamp(44px, 7.2vw, 84px);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+      color: var(--color-ink);
+      margin: 0 0 28px;
+      text-wrap: balance;
+    }
+    .dr-h1 em { font-style: italic; font-weight: 300; }
+    .dr-hero-sub {
+      font-family: var(--font-body);
+      font-size: 18px; line-height: 1.55; letter-spacing: 0.16px;
+      color: var(--color-body);
+      max-width: 580px; margin: 0 auto 40px; text-wrap: pretty;
+    }
+    .dr-hero-cta { display: inline-flex; gap: 12px; margin-bottom: 56px; }
+    .dr-hero-cta .el-btn { height: 46px; padding: 0 24px; font-size: 15px; }
+
+    /* drop-zone card */
+    .dr-drop {
+      position: relative;
+      max-width: 780px; margin: 0 auto;
+      background: var(--color-surface-card);
+      border: 1px solid var(--color-hairline);
+      border-radius: var(--radius-xxl);
+      padding: 28px;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 24px 60px rgba(12,10,9,0.04);
+      text-align: left;
+    }
+    .dr-drop-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 18px;
+    }
+    .dr-drop-meta {
+      display: flex; align-items: center; gap: 12px;
+      font-family: var(--font-body);
+    }
+    .dr-drop-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--color-semantic-success);
+      box-shadow: 0 0 0 4px rgba(22,163,74,0.12);
+    }
+    .dr-drop-name {
+      font-size: 14px; font-weight: 500; color: var(--color-ink);
+      letter-spacing: 0.1px;
+    }
+    .dr-drop-detail {
+      font-size: 13px; color: var(--color-muted); letter-spacing: 0.16px;
+    }
+    .dr-drop-actions { display: flex; gap: 8px; }
+    .dr-icon-btn {
+      width: 34px; height: 34px; border-radius: 50%;
+      background: transparent;
+      border: 1px solid var(--color-hairline);
+      display: inline-flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      color: var(--color-ink);
+      transition: background-color 180ms cubic-bezier(0.22,1,0.36,1);
+    }
+    .dr-icon-btn:hover { background: rgba(12,10,9,0.04); }
+    .dr-icon-btn.is-primary {
+      background: var(--color-primary);
+      color: var(--color-on-primary);
+      border-color: transparent;
+      width: 40px; height: 40px;
+    }
+    .dr-icon-btn.is-primary:hover { background: var(--color-primary-active); }
+    .dr-icon-btn svg { width: 14px; height: 14px; }
+
+    /* waveform */
+    .dr-wave {
+      position: relative;
+      height: 112px;
+      display: flex; align-items: center;
+      gap: 3px;
+      padding: 0 4px;
+    }
+    .dr-wave-bar {
+      flex: 1;
+      background: var(--color-hairline-strong);
+      border-radius: 2px;
+      transition: background-color 200ms ease;
+    }
+    .dr-wave-bar.is-played { background: var(--color-ink); }
+
+    .dr-drop-foot {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 18px; padding-top: 16px;
+      border-top: 1px solid var(--color-hairline-soft);
+      font-family: var(--font-body); font-size: 12px;
+      color: var(--color-muted);
+      letter-spacing: 0.16px;
+    }
+    .dr-drop-foot-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .dr-drop-time { font-variant-numeric: tabular-nums; color: var(--color-ink); }
+    .dr-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--font-body);
+      font-size: 11px; font-weight: 500;
+      color: var(--color-ink);
+      background: var(--color-surface-strong);
+      border-radius: var(--radius-pill);
+      padding: 5px 10px;
+      letter-spacing: 0.12px;
+    }
+    .dr-chip-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--color-ink);
+    }
+
+    @media (max-width: 720px) {
+      .dr-nav-links { display: none; }
+      .dr-hero { padding: 64px 20px 80px; }
+      .dr-drop { padding: 20px; }
+      .dr-drop-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+      .dr-drop-foot { flex-direction: column; align-items: flex-start; gap: 10px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- =================== NAV =================== -->
+  <header class="dr-nav" data-screen-label="Nav">
+    <div class="dr-nav-inner">
+      <a class="dr-brand" href="/">
+        <span class="dr-brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M5 12 L5 12"/>
+            <path d="M9 8 L9 16"/>
+            <path d="M13 5 L13 19"/>
+            <path d="M17 9 L17 15"/>
+            <path d="M21 12 L21 12"/>
+          </svg>
+        </span>
+        <span class="dr-brand-word">DrakonRhym</span>
+      </a>
+      <nav class="dr-nav-links">
+        <a href="/">Studio</a>
+        <a href="#">Effects</a>
+        <a href="/download">Downloads</a>
+        <a href="#">Pricing</a>
+        <a href="#">Docs</a>
+      </nav>
+      <div class="dr-nav-actions">
+        <a class="dr-signin" href="#">Sign in</a>
+        <button class="el-btn el-btn-primary">Try free</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- =================== HERO =================== -->
+  <section class="dr-hero" data-screen-label="Hero">
+    <div class="dr-hero-orb dr-hero-orb-1"></div>
+    <div class="dr-hero-orb dr-hero-orb-2"></div>
+    <div class="dr-hero-orb dr-hero-orb-3"></div>
+    <div class="dr-hero-inner">
+      <span class="dr-kicker">DrakonRhym · Audio Studio</span>
+      <h1 class="dr-h1">
+        Audio, refined. <em>Note</em> by note.
+      </h1>
+      <p class="dr-hero-sub">
+        A quiet studio for the files you care about — denoise, separate, master,
+        and transcribe with a single, considered pass.
+      </p>
+      <div class="dr-hero-cta">
+        <button class="el-btn el-btn-primary">Open the studio</button>
+        <button class="el-btn el-btn-outline">Listen to a sample</button>
+      </div>
+
+      <!-- live drop preview card -->
+      <div class="dr-drop" id="dr-drop" aria-label="Audio preview">
+        <div class="dr-drop-header">
+          <div class="dr-drop-meta">
+            <span class="dr-drop-dot" aria-hidden="true"></span>
+            <span class="dr-drop-name">midnight-vocals_take03.wav</span>
+            <span class="dr-drop-detail">— stereo · 48 kHz · 02:14</span>
+          </div>
+          <div class="dr-drop-actions">
+            <button class="dr-icon-btn" aria-label="Download">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </button>
+            <button class="dr-icon-btn is-primary" id="dr-play" aria-label="Play preview">
+              <svg id="dr-play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="dr-wave" id="dr-wave" aria-hidden="true"></div>
+        <div class="dr-drop-foot">
+          <div class="dr-drop-foot-left">
+            <span class="dr-drop-time" id="dr-time">00:00 / 02:14</span>
+            <span class="dr-chip"><span class="dr-chip-dot"></span>denoise · −18 dB</span>
+            <span class="dr-chip"><span class="dr-chip-dot"></span>de-reverb · soft</span>
+            <span class="dr-chip"><span class="dr-chip-dot"></span>master · -14 LUFS</span>
+          </div>
+          <span>Processed in 4.2s · 3 stems</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    // Hero waveform with playback simulation
+    (function() {
+      const wave = document.getElementById('dr-wave');
+      if (!wave) return;
+      const BARS = 92;
+      const heights = [];
+      for (let i = 0; i < BARS; i++) {
+        const t = i / BARS;
+        const env = Math.sin(t * Math.PI) * 0.7 + 0.3;
+        const wob = Math.sin(t * 38) * 0.15 + Math.sin(t * 11 + 0.7) * 0.25;
+        const noise = (Math.sin(i * 12.9898) * 43758.5453) % 1;
+        const h = Math.max(0.08, Math.min(1, env * (0.55 + Math.abs(wob)) + Math.abs(noise) * 0.18));
+        heights.push(h);
+      }
+      heights.forEach((h) => {
+        const bar = document.createElement('span');
+        bar.className = 'dr-wave-bar';
+        bar.style.height = (h * 100) + '%';
+        wave.appendChild(bar);
+      });
+
+      const playBtn = document.getElementById('dr-play');
+      const playIcon = document.getElementById('dr-play-icon');
+      const timeEl = document.getElementById('dr-time');
+      const DURATION = 134;
+      let playing = false;
+      let position = 0;
+      let last = 0;
+
+      function pad(n) { return n < 10 ? '0' + n : '' + n; }
+      function fmt(sec) {
+        return pad(Math.floor(sec / 60)) + ':' + pad(Math.floor(sec % 60));
+      }
+      function render() {
+        const cursor = Math.floor((position / DURATION) * BARS);
+        const bars = wave.children;
+        for (let i = 0; i < bars.length; i++) {
+          bars[i].classList.toggle('is-played', i < cursor);
+        }
+        timeEl.textContent = fmt(position) + ' / ' + fmt(DURATION);
+      }
+      function frame(t) {
+        if (!last) last = t;
+        const dt = (t - last) / 1000;
+        last = t;
+        if (playing) {
+          position += dt;
+          if (position >= DURATION) { position = 0; playing = false; setIcon(); }
+          render();
+        }
+        requestAnimationFrame(frame);
+      }
+      function setIcon() {
+        playIcon.innerHTML = playing
+          ? '<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>'
+          : '<path d="M8 5v14l11-7z"/>';
+      }
+      playBtn.addEventListener('click', () => { playing = !playing; setIcon(); });
+      render();
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
