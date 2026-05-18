@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DrakonRhym — Downloading audio</title>
   <link rel="stylesheet" href="/assets/colors_and_type.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <meta name="drakon-google-client-id" content="{{DRAKON_GOOGLE_CLIENT_ID}}">
   <style>
     body { background: var(--color-canvas); min-height: 100vh; }
     a { text-decoration: none; }
@@ -259,6 +261,22 @@
     }
     .dl-stage.is-ready .dl-ring-fill {
       stroke: var(--color-semantic-success);
+      /* Sweep the green stroke around the ring once we hit ready state.
+         This overrides the JS-set dasharray for the duration of the animation
+         and lands on a full 360° outline. */
+      animation: dl-ring-sweep 900ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
+    @keyframes dl-ring-sweep {
+      0%   { stroke-dasharray: 0 1000; }
+      100% { stroke-dasharray: 1000 0; }
+    }
+    /* The check icon fades in just after the sweep completes. */
+    .dl-stage.is-ready .dl-ring-check svg {
+      animation: dl-check-pop 320ms cubic-bezier(0.22, 1, 0.36, 1) 600ms backwards;
+    }
+    @keyframes dl-check-pop {
+      from { opacity: 0; transform: scale(0.6); }
+      to   { opacity: 1; transform: scale(1); }
     }
     .dl-ring-center {
       position: absolute; inset: 0;
@@ -526,6 +544,107 @@
     }
     .dl-format[disabled]:hover { background: transparent; }
 
+    /* sign-in overlay */
+    .dl-signin {
+      position: fixed; inset: 0;
+      display: none;
+      align-items: center; justify-content: center;
+      background: rgba(245, 245, 245, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+    .dl-signin.is-open { display: flex; }
+    .dl-signin-card {
+      background: var(--color-surface-card);
+      border: 1px solid var(--color-hairline);
+      border-radius: var(--radius-xxl);
+      box-shadow: 0 24px 60px rgba(12,10,9,0.08);
+      padding: 36px 32px;
+      width: min(420px, calc(100vw - 32px));
+      text-align: center;
+      animation: dl-signin-pop 320ms cubic-bezier(0.22,1,0.36,1);
+    }
+    @keyframes dl-signin-pop {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to   { opacity: 1; transform: none; }
+    }
+    .dl-signin-title {
+      font-family: var(--font-display); font-weight: 300;
+      font-size: 26px; line-height: 1.2; letter-spacing: -0.4px;
+      color: var(--color-ink);
+      margin: 0 0 10px;
+    }
+    .dl-signin-title em { font-style: italic; }
+    .dl-signin-sub {
+      font-family: var(--font-body); font-size: 13px; line-height: 1.55;
+      color: var(--color-body); letter-spacing: 0.15px;
+      margin: 0 0 22px;
+    }
+    /* "Login with Google" — custom button + invisible Google button overlay */
+    .dl-google-btn-wrap {
+      position: relative;
+      display: inline-block;
+      width: 280px; height: 40px;
+    }
+    .dl-google-btn-visible {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center; gap: 12px;
+      background: var(--color-ink); color: var(--color-on-primary);
+      border: 0; border-radius: var(--radius-pill);
+      font-family: var(--font-body); font-size: 14px; font-weight: 500;
+      letter-spacing: 0.1px; cursor: pointer;
+    }
+    .dl-google-btn-visible svg { width: 18px; height: 18px; flex-shrink: 0; }
+    #dl-signin-btn {
+      position: absolute; inset: 0;
+      opacity: 0;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+    }
+    .dl-signin-btn-row { display: flex; justify-content: center; }
+    .dl-signin-error {
+      margin-top: 14px;
+      font-family: var(--font-body); font-size: 12px;
+      color: var(--color-semantic-error); letter-spacing: 0.15px;
+      min-height: 16px;
+    }
+    .dl-signin-foot {
+      margin-top: 18px;
+      font-family: var(--font-body); font-size: 11px;
+      color: var(--color-muted); letter-spacing: 0.16px;
+    }
+
+    /* quota chip in nav actions */
+    .dr-quota {
+      font-family: var(--font-body); font-size: 12px; font-weight: 500;
+      color: var(--color-muted); letter-spacing: 0.16px;
+    }
+    .dr-quota strong { color: var(--color-ink); font-weight: 600; }
+
+    /* signed-in user pill */
+    .dr-user {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 4px 12px 4px 4px;
+      border-radius: var(--radius-pill);
+      background: var(--color-surface-strong);
+      max-width: 220px;
+    }
+    .dr-user-avatar {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: var(--color-hairline);
+    }
+    .dr-user-name {
+      font-family: var(--font-body);
+      font-size: 13px; font-weight: 500;
+      color: var(--color-ink);
+      letter-spacing: 0.1px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
     /* responsive */
     @media (max-width: 640px) {
       .dl-nav-links { display: none; }
@@ -543,6 +662,35 @@
   </style>
 </head>
 <body>
+
+  <!-- SIGN-IN OVERLAY -->
+  <div class="dl-signin" id="dl-signin" role="dialog" aria-modal="true" aria-labelledby="dl-signin-title">
+    <div class="dl-signin-card">
+      <h2 class="dl-signin-title" id="dl-signin-title">Sign in <em>to download</em></h2>
+      <p class="dl-signin-sub">
+        We ask you to sign in with Google to keep this service free and prevent abuse.
+        Your daily quota refreshes every 24 hours.
+      </p>
+      <div class="dl-signin-btn-row">
+        <div class="dl-google-btn-wrap">
+          <button class="dl-google-btn-visible" type="button" aria-hidden="true" tabindex="-1">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+            </svg>
+            <span>Login with Google</span>
+          </button>
+          <div id="dl-signin-btn"></div>
+        </div>
+      </div>
+      <div class="dl-signin-error" id="dl-signin-error"></div>
+      <div class="dl-signin-foot">
+        We only store your Google ID to count downloads — no email, no profile data.
+      </div>
+    </div>
+  </div>
 
   <!-- NAV -->
   <header class="dr-nav" data-screen-label="Nav">
@@ -563,8 +711,12 @@
         <a href="#">Docs</a>
       </nav>
       <div class="dr-nav-actions">
-        <a href="/" style="font-family: var(--font-body); font-size: 14px; font-weight: 500; color: var(--color-ink);">Sign in</a>
-        <button class="el-btn el-btn-primary">Try free</button>
+        <span class="dr-quota" id="dr-quota" hidden></span>
+        <div class="dr-user" id="dr-user" hidden>
+          <img class="dr-user-avatar" id="dr-user-avatar" alt="" referrerpolicy="no-referrer">
+          <span class="dr-user-name" id="dr-user-name"></span>
+        </div>
+        <button class="el-btn el-btn-ghost" id="dr-signout" hidden>Sign out</button>
       </div>
     </div>
   </header>
@@ -683,10 +835,10 @@
         <div class="dl-ready-bar" id="dl-ready">
           <div class="dl-formats">
             <span class="dl-formats-label">Save as</span>
-            <button class="dl-format is-active" data-fmt="mp3">MP3 192 <span class="dl-format-size">6.0 MB</span></button>
-            <button class="dl-format" data-fmt="m4a">M4A <span class="dl-format-size">5.4 MB</span></button>
-            <button class="dl-format" data-fmt="wav">WAV <span class="dl-format-size">46.1 MB</span></button>
-            <button class="dl-format" data-fmt="flac">FLAC <span class="dl-format-size">28.7 MB</span></button>
+            <button class="dl-format is-active" data-fmt="mp3">MP3 192 <span class="dl-format-size">— MB</span></button>
+            <button class="dl-format" data-fmt="m4a" hidden>M4A <span class="dl-format-size">5.4 MB</span></button>
+            <button class="dl-format" data-fmt="wav" hidden>WAV <span class="dl-format-size">46.1 MB</span></button>
+            <button class="dl-format" data-fmt="flac" hidden>FLAC <span class="dl-format-size">28.7 MB</span></button>
           </div>
 
           <div class="dl-actions">
@@ -781,10 +933,212 @@
         return n + ' views';
       }
 
-      async function loadMetadata() {
+      // ---- Google sign-in (in-memory token, no persistent cache) ----
+      const _metaEl = document.querySelector('meta[name="drakon-google-client-id"]');
+      const GOOGLE_CLIENT_ID = (_metaEl ? _metaEl.content : '') || '';
+      // Valid Google OAuth client IDs always look like "<digits>-<chars>.apps.googleusercontent.com".
+      // This regex lets us detect both empty and un-rendered placeholders.
+      const AUTH_DISABLED = !/\.apps\.googleusercontent\.com$/.test(GOOGLE_CLIENT_ID);
+      const signinOverlay = document.getElementById('dl-signin');
+      const signinBtn     = document.getElementById('dl-signin-btn');
+      const signinError   = document.getElementById('dl-signin-error');
+      const quotaEl       = document.getElementById('dr-quota');
+      const signoutBtn    = document.getElementById('dr-signout');
+      const userPill      = document.getElementById('dr-user');
+      const userAvatarEl  = document.getElementById('dr-user-avatar');
+      const userNameEl    = document.getElementById('dr-user-name');
+
+      function renderUserFromToken(token) {
+        const payload = decodeJwtPayload(token);
+        if (!payload) {
+          userPill.hidden = true;
+          return;
+        }
+        userPill.hidden = false;
+        userNameEl.textContent = payload.name || payload.email || 'Signed in';
+        if (payload.picture) {
+          userAvatarEl.src = payload.picture;
+        } else {
+          userAvatarEl.removeAttribute('src');
+        }
+      }
+      function clearUserPill() {
+        userPill.hidden = true;
+        userNameEl.textContent = '';
+        userAvatarEl.removeAttribute('src');
+      }
+
+      // Persist the ID token in localStorage so the user only signs in once
+      // per token lifetime (Google ID tokens last ~1 hour).
+      const TOKEN_KEY = 'drakon_id_token';
+
+      function decodeJwtPayload(token) {
+        try {
+          let part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+          while (part.length % 4) part += '=';  // atob needs base64 padding
+          // atob returns a binary string (Latin-1). For multi-byte UTF-8
+          // characters (e.g. Vietnamese names) we must re-decode through
+          // TextDecoder so they don't end up as mojibake.
+          const binary = atob(part);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          return JSON.parse(new TextDecoder('utf-8').decode(bytes));
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function isTokenStillValid(token) {
+        if (!token) return false;
+        const payload = decodeJwtPayload(token);
+        if (!payload || !payload.exp) return false;
+        // Treat tokens within 30s of expiry as already expired so we don't
+        // race the server clock.
+        return payload.exp * 1000 > Date.now() + 30_000;
+      }
+
+      function getCachedToken() {
+        try {
+          const t = localStorage.getItem(TOKEN_KEY);
+          if (isTokenStillValid(t)) return t;
+          if (t) localStorage.removeItem(TOKEN_KEY);
+        } catch (_) {}
+        return null;
+      }
+
+      function setCachedToken(t) {
+        try {
+          if (t) localStorage.setItem(TOKEN_KEY, t);
+          else   localStorage.removeItem(TOKEN_KEY);
+        } catch (_) {}
+      }
+      function showQuota(remaining) {
+        if (remaining == null) return;
+        quotaEl.hidden = false;
+        quotaEl.innerHTML = '<strong>' + remaining + '</strong> downloads left today';
+      }
+      function authHeaders() {
+        const t = getCachedToken();
+        return t ? { Authorization: 'Bearer ' + t } : {};
+      }
+
+      function openSignIn() {
+        if (AUTH_DISABLED) return;
+        signinOverlay.classList.add('is-open');
+      }
+      function closeSignIn() {
+        signinOverlay.classList.remove('is-open');
+      }
+      function signOut() {
+        setCachedToken(null);
+        quotaEl.hidden = true;
+        signoutBtn.hidden = true;
+        clearUserPill();
+        openSignIn();
+      }
+      signoutBtn.addEventListener('click', signOut);
+
+      function whenGisReady(cb, onTimeout, timeoutMs = 8000) {
+        const start = Date.now();
+        (function poll() {
+          if (window.google && window.google.accounts && window.google.accounts.id) return cb();
+          if (Date.now() - start > timeoutMs) return onTimeout && onTimeout();
+          setTimeout(poll, 80);
+        })();
+      }
+
+      let isGisInitialised = false;
+      let pendingSignInResolve = null;
+      let signInPromise = null;
+      function initGisOnce() {
+        if (AUTH_DISABLED || isGisInitialised) return Promise.resolve(true);
+        return new Promise((resolve) => {
+          whenGisReady(
+            () => {
+              google.accounts.id.initialize({
+                client_id: GOOGLE_CLIENT_ID,
+                callback: (response) => {
+                  if (!response || !response.credential) {
+                    signinError.textContent = 'Sign-in failed. Please try again.';
+                    return;
+                  }
+                  setCachedToken(response.credential);
+                  renderUserFromToken(response.credential);
+                  closeSignIn();
+                  signoutBtn.hidden = false;
+                  if (pendingSignInResolve) {
+                    const r = pendingSignInResolve;
+                    pendingSignInResolve = null;
+                    signInPromise = null;
+                    r();
+                  }
+                },
+                auto_select: false,
+                locale: 'en',
+              });
+              google.accounts.id.renderButton(signinBtn, {
+                theme: 'filled_black',
+                size: 'large',
+                shape: 'pill',
+                text: 'signin_with',
+                width: 280,
+                locale: 'en',
+              });
+              isGisInitialised = true;
+              resolve(true);
+            },
+            () => {
+              console.error('[drakon] Google Identity Services failed to load within 8s — likely blocked by an extension or network policy.');
+              signinError.innerHTML =
+                '<strong>Google sign-in script failed to load.</strong><br>' +
+                'Check ad-blockers / privacy extensions (Cookie-Editor, uBlock, etc.) — they may be blocking <code>accounts.google.com</code>. Disable them for this site and reload.';
+              resolve(false);
+            }
+          );
+        });
+      }
+
+      async function ensureSignedIn() {
+        if (AUTH_DISABLED) return;
+        // Fast path: token already cached and still valid → skip the modal,
+        // just reveal the user pill + Sign out button in the nav.
+        const cached = getCachedToken();
+        if (cached) {
+          renderUserFromToken(cached);
+          signoutBtn.hidden = false;
+          // Still init GIS in the background so the modal is primed if the
+          // token gets rejected mid-session and we have to ask the user again.
+          initGisOnce();
+          return;
+        }
+        // No usable token — show the sign-in overlay.
+        signinError.textContent = '';
+        openSignIn();
+        signoutBtn.hidden = true;
+        clearUserPill();
+        const ok = await initGisOnce();
+        if (!ok) {
+          // GIS never loaded. Leave the modal open with the helpful error.
+          return new Promise(() => {});
+        }
+        if (!signInPromise) {
+          signInPromise = new Promise((resolve) => { pendingSignInResolve = resolve; });
+        }
+        await signInPromise;
+      }
+
+      async function loadMetadata(_attempt = 0) {
         if (!url) return;
         try {
-          const r = await fetch('/api/metadata?url=' + encodeURIComponent(url));
+          const r = await fetch('/api/metadata?url=' + encodeURIComponent(url), {
+            headers: authHeaders(),
+          });
+          if (r.status === 401 && _attempt === 0) {
+            setCachedToken(null);
+            signoutBtn.hidden = true;
+            await ensureSignedIn();
+            return loadMetadata(_attempt + 1);
+          }
           if (!r.ok) return;
           const m = await r.json();
           videoTitle = m.title || null;
@@ -802,11 +1156,9 @@
             img.src = m.thumbnail;
           }
         } catch (_) {
-          // Soft fail — keep placeholders, the download flow still works.
+          // Soft fail — keep placeholders.
         }
       }
-      // Fire and forget; we don't block the download on this.
-      loadMetadata();
 
       // ---- element handles ----
       const stage     = document.getElementById('dl-stage');
@@ -827,7 +1179,10 @@
       // ---- helpers ----
       function setRing(p) {
         const dash = (p / 100) * C;
-        ringFill.setAttribute('stroke-dasharray', dash + ' ' + (C - dash));
+        // Use inline style (not setAttribute) so it overrides the CSS rule
+        // `.dl-ring-fill { stroke-dasharray: 0 999 }` — CSS properties win
+        // over SVG presentation attributes.
+        ringFill.style.strokeDasharray = dash + ' ' + (C - dash);
       }
       function updatePct(p) {
         pctEl.textContent = Math.floor(p);
@@ -907,6 +1262,7 @@
         etaEl.textContent = '—';
       }
 
+      let downloadAttempt = 0;
       async function startDownload() {
         if (!url) {
           showError('Missing URL.', 'Open this page from the DrakonRhym browser extension — it supplies the source link.');
@@ -981,12 +1337,25 @@
 
         let response;
         try {
-          response = await fetch(apiUrl, { signal: abortController.signal });
+          response = await fetch(apiUrl, { signal: abortController.signal, headers: authHeaders() });
         } catch (e) {
           phase1Running = false;
           if (e.name === 'AbortError') return;
           showError('Network error.', 'Could not reach the server. Check your connection and try again.');
           return;
+        }
+
+        if (response.status === 401) {
+          phase1Running = false;
+          if (AUTH_DISABLED || downloadAttempt >= 1) {
+            showError('Authentication required.', 'The server rejected the request. Try signing in again or reload the page.');
+            return;
+          }
+          setCachedToken(null);
+          signoutBtn.hidden = true;
+          downloadAttempt += 1;
+          await ensureSignedIn();
+          return startDownload();
         }
 
         if (!response.ok) {
@@ -997,9 +1366,13 @@
             if (data && typeof data.detail === 'string') msg = data.detail;
             else if (data && Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg) msg = data.detail[0].msg;
           } catch (_) { /* non-json body */ }
-          showError('Download failed.', msg);
+          showError(response.status === 429 ? 'Daily limit reached.' : 'Download failed.', msg);
           return;
         }
+
+        // Update quota chip from the response header (if present).
+        const quotaHeader = response.headers.get('X-Quota-Remaining');
+        if (quotaHeader != null) showQuota(parseInt(quotaHeader, 10));
 
         // -------- PHASE 2: response body is streaming — switch to real bytes --------
         phase1Running = false;
@@ -1092,6 +1465,7 @@
       });
 
       restartBtn.addEventListener('click', () => {
+        downloadAttempt = 0;
         startDownload();
       });
 
@@ -1116,17 +1490,13 @@
         }, 1600);
       });
 
-      // Only MP3 is produced by the backend right now; disable the rest.
-      document.querySelectorAll('.dl-format').forEach((btn) => {
-        if (btn.dataset.fmt === 'mp3') return;
-        btn.setAttribute('disabled', '');
-        btn.title = 'Coming soon';
-        btn.addEventListener('click', (e) => e.preventDefault());
-      });
-
-      // Kick off.
+      // Kick off: wait for sign-in (no-op in DEV), then load metadata + start download.
       setRing(0);
-      startDownload();
+      (async () => {
+        await ensureSignedIn();
+        loadMetadata();          // fire-and-forget, fills UI when it arrives
+        startDownload();
+      })();
     })();
   </script>
 </body>
