@@ -185,12 +185,12 @@ app.mount(
 
 @app.get("/", include_in_schema=False)
 async def home_page() -> FileResponse:
-    return FileResponse(BASE_DIR / "HomePage.html", media_type="text/html")
+    return FileResponse(BASE_DIR / "UI" / "HomePage.html", media_type="text/html")
 
 
 @app.get("/download", include_in_schema=False)
 async def download_page() -> FileResponse:
-    return FileResponse(BASE_DIR / "DownloadPage.html", media_type="text/html")
+    return FileResponse(BASE_DIR / "UI" / "DownloadPage.html", media_type="text/html")
 
 
 @app.get("/health")
