@@ -128,7 +128,9 @@ def _verify_google_id_token(authorization: str | None) -> str | None:
     if not GOOGLE_CLIENT_ID:
         return None
     if not authorization or not authorization.startswith("Bearer "):
-        logger.info("Auth rejected: header missing or malformed (got %r)", authorization)
+        # Never log the header value itself — even a malformed value might
+        # contain a real bearer token someone tried to send.
+        logger.info("Auth rejected: header missing or malformed")
         raise HTTPException(status_code=401, detail="Missing bearer token.")
     token = authorization.removeprefix("Bearer ").strip()
     if not token:

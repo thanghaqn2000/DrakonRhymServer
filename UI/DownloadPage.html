@@ -1013,7 +1013,7 @@
         } catch (_) {}
       }
       function showQuota(remaining) {
-        if (remaining == null) return;
+        if (!Number.isFinite(remaining)) return;
         quotaEl.hidden = false;
         quotaEl.innerHTML = '<strong>' + remaining + '</strong> downloads left today';
       }
