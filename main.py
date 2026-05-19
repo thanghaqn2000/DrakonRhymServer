@@ -25,6 +25,8 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from starlette.background import BackgroundTask
 
+import db
+
 BASE_DIR = Path(__file__).resolve().parent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -119,11 +121,11 @@ _download_rate = _RateLimiter(limit=RATE_LIMIT_PER_DAY, window_seconds=86400)
 _metadata_rate = _RateLimiter(limit=30, window_seconds=60)
 
 
-def _verify_google_id_token(authorization: str | None) -> str | None:
-    """Verify a Bearer ID token from the Authorization header.
+def _verify_google_id_token_claims(authorization: str | None) -> dict | None:
+    """Verify a Bearer ID token and return the full claims dict.
 
-    Returns the user's stable Google `sub` claim. Raises 401 on any failure.
-    No-op (returns None) when `GOOGLE_CLIENT_ID` is empty — DEV mode.
+    Raises 401 on any failure. Returns None when `GOOGLE_CLIENT_ID` is empty
+    (DEV mode — auth is disabled).
     """
     if not GOOGLE_CLIENT_ID:
         return None
@@ -140,10 +142,37 @@ def _verify_google_id_token(authorization: str | None) -> str | None:
     except ValueError as e:
         logger.info("Google token verification failed: %s", e)
         raise HTTPException(status_code=401, detail="Invalid Google token.") from e
-    sub = claims.get("sub")
-    if not sub:
+    if not claims.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject claim.")
-    return sub
+    return claims
+
+
+def _verify_google_id_token(authorization: str | None) -> str | None:
+    """Backwards-compatible wrapper that returns just the `sub` claim."""
+    claims = _verify_google_id_token_claims(authorization)
+    return claims.get("sub") if claims else None
+
+
+def _auth_and_upsert(authorization: str | None) -> tuple[str | None, dict | None]:
+    """Verify the token and (if Supabase is configured) upsert the user row.
+
+    Returns (google_sub, user_row). `user_row` is None when Supabase is off
+    or the upsert failed; callers should treat that as 'persistence disabled,
+    fall back to anonymous behaviour'.
+    """
+    claims = _verify_google_id_token_claims(authorization)
+    if claims is None:
+        return None, None
+    google_sub = claims["sub"]
+    if not db.is_enabled():
+        return google_sub, None
+    user_row = db.upsert_user(
+        google_sub,
+        email=claims.get("email"),
+        name=claims.get("name"),
+        avatar_url=claims.get("picture"),
+    )
+    return google_sub, user_row
 
 app = FastAPI(title="DrakonRhymServer", version="0.1.0")
 
@@ -314,7 +343,7 @@ async def metadata(
     url: str = Query(..., description="YouTube URL"),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    user_sub = _verify_google_id_token(authorization)
+    user_sub, _user_row = _auth_and_upsert(authorization)
     # Burst cap: signed-in users can't spam yt-dlp subprocesses by hammering
     # this endpoint. Generous enough that a normal page load (one call per
     # download) is never affected.
@@ -377,7 +406,7 @@ async def download(
     ),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    user_sub = _verify_google_id_token(authorization)
+    user_sub, user_row = _auth_and_upsert(authorization)
 
     # Validate URL BEFORE consuming quota — a bad URL is the caller's fault
     # but shouldn't burn one of their daily downloads.
@@ -387,20 +416,72 @@ async def download(
             detail="Invalid URL — only YouTube domains are accepted.",
         )
 
+    # Quota source of truth:
+    #   - Supabase RPC `consume_quota` when DB is configured (per-user limit
+    #     in the `users` table, persisted across restarts, supports overrides)
+    #   - In-memory _download_rate otherwise (DEV / single-process fallback)
+    used_db_quota = False
+    remaining: int | None = None
     if user_sub is not None:
-        allowed, remaining = await _download_rate.consume(user_sub)
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
-            )
-    else:
-        remaining = None
+        if user_row is not None:
+            result = db.consume_quota(user_row["id"])
+            if result is None:
+                # RPC failed despite Supabase being configured — fall back to
+                # in-memory limiter so we still meter the request.
+                allowed, remaining = await _download_rate.consume(user_sub)
+                if not allowed:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
+                    )
+            else:
+                used_db_quota = True
+                if not result.get("allowed"):
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            f"Daily download limit reached "
+                            f"({result.get('limit', '?')}). Try again tomorrow."
+                        ),
+                    )
+                remaining = max(0, int(result.get("limit", 0)) - int(result.get("used", 0)))
+        else:
+            allowed, remaining = await _download_rate.consume(user_sub)
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
+                )
 
     # Match the extension's slider: clamp to step 0.1 using half-away-from-zero
     # rounding (1.25 -> 1.3, not 1.2 as Python's banker's-rounding `round` gives).
     pitch = float(Decimal(str(pitch)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
     pitch_factor = 2 ** (pitch / 12)
+    semitones, cents = db.split_pitch_to_semitones_cents(pitch)
+
+    def _refund_quota() -> None:
+        """Roll back the quota slot we just consumed."""
+        if user_sub is None:
+            return
+        if used_db_quota and user_row is not None:
+            db.refund_quota(user_row["id"])
+        else:
+            # _download_rate.refund is async; schedule it inline below.
+            pass
+
+    async def _refund_inmem_if_needed() -> None:
+        if user_sub is not None and not used_db_quota:
+            await _download_rate.refund(user_sub)
+
+    def _record_failed() -> None:
+        if user_row is not None:
+            db.record_download(
+                user_id=user_row["id"],
+                youtube_url=url,
+                semitones=semitones,
+                cents=cents,
+                status="failed",
+            )
 
     req_id = uuid.uuid4().hex[:8]
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
@@ -411,6 +492,17 @@ async def download(
             source = await _download_audio(url, workdir, req_id)
             output = workdir / f"shifted_{req_id}.mp3"
             await _apply_pitch_shift(source, output, pitch_factor, req_id)
+
+        # Success — persist a "success" download row. Counters were already
+        # incremented atomically inside consume_quota.
+        if user_row is not None:
+            db.record_download(
+                user_id=user_row["id"],
+                youtube_url=url,
+                semitones=semitones,
+                cents=cents,
+                status="success",
+            )
 
         filename = f"drakonrhym_{pitch:+.1f}st.mp3"
         headers = {"X-Pitch-Applied": f"{pitch:.1f}"}
@@ -426,21 +518,21 @@ async def download(
         delivered = True
         return response
     except HTTPException:
-        # The caller's quota was already consumed before we knew whether the
-        # video was actually fetchable. Refund so failed downloads don't eat
-        # their daily budget. Cancellations and unexpected 500s also refund.
-        if user_sub is not None:
-            await _download_rate.refund(user_sub)
+        _refund_quota()
+        await _refund_inmem_if_needed()
+        _record_failed()
         raise
     except asyncio.CancelledError:
         logger.info("[%s] request cancelled by client", req_id)
-        if user_sub is not None:
-            await _download_rate.refund(user_sub)
+        _refund_quota()
+        await _refund_inmem_if_needed()
+        _record_failed()
         raise
     except Exception as e:
         logger.exception("[%s] unexpected error", req_id)
-        if user_sub is not None:
-            await _download_rate.refund(user_sub)
+        _refund_quota()
+        await _refund_inmem_if_needed()
+        _record_failed()
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error (ref: {req_id}).",
@@ -448,6 +540,45 @@ async def download(
     finally:
         if not delivered:
             _cleanup(workdir)
+
+
+@app.get("/api/me")
+async def me(authorization: str | None = Header(None, alias="Authorization")):
+    """Return the signed-in user's profile + current quota state.
+
+    Requires a valid bearer token. If Supabase is not configured, returns just
+    the claims from the Google token (no quota fields).
+    """
+    claims = _verify_google_id_token_claims(authorization)
+    if claims is None:
+        # DEV mode (auth disabled). Behave like an anonymous session.
+        return {"signed_in": False}
+    user_row = db.upsert_user(
+        claims["sub"],
+        email=claims.get("email"),
+        name=claims.get("name"),
+        avatar_url=claims.get("picture"),
+    )
+    if user_row is None:
+        return {
+            "signed_in": True,
+            "google_id": claims["sub"],
+            "email": claims.get("email"),
+            "name": claims.get("name"),
+            "avatar_url": claims.get("picture"),
+        }
+    return {
+        "signed_in": True,
+        "id": user_row["id"],
+        "google_id": user_row["google_id"],
+        "email": user_row.get("email"),
+        "name": user_row.get("name"),
+        "avatar_url": user_row.get("avatar_url"),
+        "download_count": user_row.get("download_count", 0),
+        "daily_download_limit": user_row.get("daily_download_limit", 0),
+        "daily_download_used": user_row.get("daily_download_used", 0),
+        "last_download_date": user_row.get("last_download_date"),
+    }
 
 
 if __name__ == "__main__":
