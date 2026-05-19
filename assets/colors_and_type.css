@@ -53,6 +53,8 @@
 *, *::before, *::after {
   box-sizing: border-box;
 }
+/* Force `hidden` attribute to win over component-level `display: inline-flex` etc. */
+[hidden] { display: none !important; }
 html, body {
   margin: 0;
   padding: 0;

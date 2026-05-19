@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DrakonRhym — Audio, refined.</title>
   <link rel="stylesheet" href="/assets/colors_and_type.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <meta name="drakon-google-client-id" content="{{DRAKON_GOOGLE_CLIENT_ID}}">
   <style>
     body { background: var(--color-canvas); min-height: 100vh; }
     a { text-decoration: none; }
@@ -216,9 +218,142 @@
       .dr-drop-header { flex-direction: column; align-items: flex-start; gap: 12px; }
       .dr-drop-foot { flex-direction: column; align-items: flex-start; gap: 10px; }
     }
+
+    /* signed-in user pill */
+    .dr-user {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 4px 12px 4px 4px;
+      border-radius: var(--radius-pill);
+      background: var(--color-surface-strong);
+      max-width: 220px;
+    }
+    .dr-user-avatar {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: var(--color-hairline);
+    }
+    .dr-user-name {
+      font-family: var(--font-body);
+      font-size: 13px; font-weight: 500;
+      color: var(--color-ink);
+      letter-spacing: 0.1px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* sign-in overlay */
+    .dr-signin-overlay {
+      position: fixed; inset: 0;
+      display: none;
+      align-items: center; justify-content: center;
+      background: rgba(245, 245, 245, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+    .dr-signin-overlay.is-open { display: flex; }
+    .dr-signin-card {
+      background: var(--color-surface-card);
+      border: 1px solid var(--color-hairline);
+      border-radius: var(--radius-xxl);
+      box-shadow: 0 24px 60px rgba(12,10,9,0.08);
+      padding: 36px 32px;
+      width: min(420px, calc(100vw - 32px));
+      text-align: center;
+      animation: dr-pop 320ms cubic-bezier(0.22,1,0.36,1);
+    }
+    @keyframes dr-pop {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to   { opacity: 1; transform: none; }
+    }
+    .dr-signin-title {
+      font-family: var(--font-display); font-weight: 300;
+      font-size: 26px; line-height: 1.2; letter-spacing: -0.4px;
+      color: var(--color-ink);
+      margin: 0 0 10px;
+    }
+    .dr-signin-title em { font-style: italic; }
+    .dr-signin-sub {
+      font-family: var(--font-body); font-size: 13px; line-height: 1.55;
+      color: var(--color-body); letter-spacing: 0.15px;
+      margin: 0 0 22px;
+    }
+    /* "Login with Google" — custom-styled button. We render Google's official
+       sign-in button invisibly on top of it so the click still triggers the
+       proper OAuth popup (Google's library only lets us pick from preset
+       wordings on its own button). */
+    .dr-google-btn-wrap {
+      position: relative;
+      display: inline-block;
+      width: 280px; height: 40px;
+      margin: 0 auto;
+    }
+    .dr-google-btn-visible {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center; gap: 12px;
+      background: var(--color-ink); color: var(--color-on-primary);
+      border: 0; border-radius: var(--radius-pill);
+      font-family: var(--font-body); font-size: 14px; font-weight: 500;
+      letter-spacing: 0.1px; cursor: pointer;
+    }
+    .dr-google-btn-visible svg { width: 18px; height: 18px; flex-shrink: 0; }
+    #dr-signin-google-btn {
+      position: absolute; inset: 0;
+      opacity: 0;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+    }
+    .dr-google-btn-wrap:focus-within .dr-google-btn-visible {
+      outline: 2px solid var(--color-ink);
+      outline-offset: 3px;
+    }
+    .dr-signin-btn-row {
+      display: flex; justify-content: center;
+    }
+    .dr-signin-error {
+      margin-top: 14px;
+      font-family: var(--font-body); font-size: 12px;
+      color: var(--color-semantic-error); letter-spacing: 0.15px;
+      min-height: 16px;
+    }
+    .dr-signin-close {
+      margin-top: 14px;
+      background: transparent; border: 0;
+      font-family: var(--font-body); font-size: 12px;
+      color: var(--color-muted); cursor: pointer;
+      letter-spacing: 0.15px;
+    }
+    .dr-signin-close:hover { color: var(--color-ink); }
   </style>
 </head>
 <body>
+
+  <!-- =================== SIGN-IN OVERLAY =================== -->
+  <div class="dr-signin-overlay" id="dr-signin-overlay" role="dialog" aria-modal="true">
+    <div class="dr-signin-card">
+      <h2 class="dr-signin-title">Sign in <em>to DrakonRhym</em></h2>
+      <p class="dr-signin-sub">
+        Sign in with Google so we can keep this service free and apply a fair daily download quota per account.
+      </p>
+      <div class="dr-signin-btn-row">
+        <div class="dr-google-btn-wrap">
+          <button class="dr-google-btn-visible" type="button" id="dr-google-fake-btn" aria-hidden="true" tabindex="-1">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+            </svg>
+            <span>Login with Google</span>
+          </button>
+          <div id="dr-signin-google-btn"></div>
+        </div>
+      </div>
+      <div class="dr-signin-error" id="dr-signin-error"></div>
+      <button class="dr-signin-close" id="dr-signin-cancel" type="button">Not now</button>
+    </div>
+  </div>
 
   <!-- =================== NAV =================== -->
   <header class="dr-nav" data-screen-label="Nav">
@@ -243,8 +378,12 @@
         <a href="#">Docs</a>
       </nav>
       <div class="dr-nav-actions">
-        <a class="dr-signin" href="#">Sign in</a>
-        <button class="el-btn el-btn-primary">Try free</button>
+        <div class="dr-user" id="dr-user" hidden>
+          <img class="dr-user-avatar" id="dr-user-avatar" alt="" referrerpolicy="no-referrer">
+          <span class="dr-user-name" id="dr-user-name"></span>
+        </div>
+        <button class="el-btn el-btn-ghost" id="dr-signout" hidden>Sign out</button>
+        <button class="el-btn el-btn-primary" id="dr-signin">Sign in</button>
       </div>
     </div>
   </header>
@@ -360,6 +499,146 @@
       playBtn.addEventListener('click', () => { playing = !playing; setIcon(); });
       render();
       requestAnimationFrame(frame);
+    })();
+
+    // -------- Google sign-in on the landing page --------
+    (function() {
+      const TOKEN_KEY = 'drakon_id_token';
+      const metaEl = document.querySelector('meta[name="drakon-google-client-id"]');
+      const GOOGLE_CLIENT_ID = (metaEl ? metaEl.content : '') || '';
+      const AUTH_DISABLED = !/\.apps\.googleusercontent\.com$/.test(GOOGLE_CLIENT_ID);
+
+      const overlay      = document.getElementById('dr-signin-overlay');
+      const googleBtnEl  = document.getElementById('dr-signin-google-btn');
+      const errorEl      = document.getElementById('dr-signin-error');
+      const cancelBtn    = document.getElementById('dr-signin-cancel');
+      const signinBtn    = document.getElementById('dr-signin');
+      const signoutBtn   = document.getElementById('dr-signout');
+      const userPill     = document.getElementById('dr-user');
+      const userAvatarEl = document.getElementById('dr-user-avatar');
+      const userNameEl   = document.getElementById('dr-user-name');
+
+      function decodeJwtPayload(token) {
+        try {
+          let part = token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+          while (part.length % 4) part += '=';
+          const binary = atob(part);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          return JSON.parse(new TextDecoder('utf-8').decode(bytes));
+        } catch (_) { return null; }
+      }
+      function isTokenValid(t) {
+        if (!t) return false;
+        const p = decodeJwtPayload(t);
+        return !!(p && p.exp && p.exp * 1000 > Date.now() + 30_000);
+      }
+      function getToken() {
+        try {
+          const t = localStorage.getItem(TOKEN_KEY);
+          if (isTokenValid(t)) return t;
+          if (t) localStorage.removeItem(TOKEN_KEY);
+        } catch (_) {}
+        return null;
+      }
+      function setToken(t) {
+        try {
+          if (t) localStorage.setItem(TOKEN_KEY, t);
+          else   localStorage.removeItem(TOKEN_KEY);
+        } catch (_) {}
+      }
+
+      function renderSignedIn(token) {
+        const p = decodeJwtPayload(token);
+        if (!p) return renderSignedOut();
+        userPill.hidden = false;
+        userNameEl.textContent = p.name || p.email || 'Signed in';
+        if (p.picture) userAvatarEl.src = p.picture;
+        signoutBtn.hidden = false;
+        signinBtn.hidden = true;
+      }
+      function renderSignedOut() {
+        userPill.hidden = true;
+        userNameEl.textContent = '';
+        userAvatarEl.removeAttribute('src');
+        signoutBtn.hidden = true;
+        signinBtn.hidden = false;
+      }
+
+      function openOverlay() {
+        if (AUTH_DISABLED) return;
+        errorEl.textContent = '';
+        overlay.classList.add('is-open');
+        requestAnimationFrame(() => {
+          const target = googleBtnEl.querySelector('iframe, [role="button"], button, [tabindex]') || googleBtnEl;
+          if (target && typeof target.focus === 'function') {
+            try { target.focus(); } catch (_) {}
+          }
+        });
+      }
+      function closeOverlay() {
+        overlay.classList.remove('is-open');
+      }
+
+      let gisInitialised = false;
+      function whenGisReady(cb, onTimeout, ms = 8000) {
+        const start = Date.now();
+        (function poll() {
+          if (window.google && window.google.accounts && window.google.accounts.id) return cb();
+          if (Date.now() - start > ms) return onTimeout && onTimeout();
+          setTimeout(poll, 80);
+        })();
+      }
+      function initGis() {
+        if (gisInitialised || AUTH_DISABLED) return;
+        whenGisReady(
+          () => {
+            google.accounts.id.initialize({
+              client_id: GOOGLE_CLIENT_ID,
+              callback: (resp) => {
+                if (!resp || !resp.credential) {
+                  errorEl.textContent = 'Sign-in failed. Please try again.';
+                  return;
+                }
+                setToken(resp.credential);
+                renderSignedIn(resp.credential);
+                closeOverlay();
+              },
+              auto_select: false,
+              locale: 'en',
+            });
+            google.accounts.id.renderButton(googleBtnEl, {
+              theme: 'filled_black',
+              size: 'large',
+              shape: 'pill',
+              text: 'signin_with',
+              width: 280,
+              locale: 'en',
+            });
+            gisInitialised = true;
+          },
+          () => {
+            errorEl.innerHTML =
+              '<strong>Google sign-in script failed to load.</strong><br>' +
+              'Disable ad-blocker / privacy extensions for this site and reload.';
+          }
+        );
+      }
+
+      signinBtn.addEventListener('click', () => { openOverlay(); initGis(); });
+      cancelBtn.addEventListener('click', closeOverlay);
+      signoutBtn.addEventListener('click', () => {
+        setToken(null);
+        renderSignedOut();
+      });
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeOverlay();
+      });
+
+      // On page load, reflect any cached session state.
+      const cached = getToken();
+      if (cached) renderSignedIn(cached);
+      else        renderSignedOut();
     })();
   </script>
 </body>

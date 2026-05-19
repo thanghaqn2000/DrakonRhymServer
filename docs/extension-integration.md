@@ -33,7 +33,7 @@ https://example.com/download
 
 `pitch=0` cũng OK (tải nguyên gốc, không shift).
 
-> Auth/abuse-prevention sẽ được thêm sau qua Google login — xem tài liệu sẽ ra riêng.
+> Web yêu cầu user **đăng nhập Google** trước khi tải. Mỗi user có quota mặc định **20 download/ngày**. Extension không cần làm gì — web tự xử lý sign-in qua Google Identity Services. Lần đầu user đến web sẽ thấy modal "Sign in to download"; sau khi sign in OK, ID token cache trong `localStorage` và sống ~1 giờ (theo `exp` claim), trong khoảng đó user không phải đăng nhập lại.
 
 ---
 
