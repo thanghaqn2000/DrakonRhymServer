@@ -155,12 +155,15 @@ def _verify_google_id_token(authorization: str | None) -> str | None:
     return claims.get("sub") if claims else None
 
 
-def _auth_and_upsert(authorization: str | None) -> tuple[str | None, dict | None]:
+async def _auth_and_upsert(authorization: str | None) -> tuple[str | None, dict | None]:
     """Verify the token and (if Supabase is configured) upsert the user row.
 
     Returns (google_sub, user_row). `user_row` is None when Supabase is off
     or the upsert failed; callers should treat that as 'persistence disabled,
     fall back to anonymous behaviour'.
+
+    `db.upsert_user` is a synchronous HTTP call to Supabase, so we offload
+    it to a worker thread to keep the event loop free.
     """
     claims = _verify_google_id_token_claims(authorization)
     if claims is None:
@@ -168,7 +171,8 @@ def _auth_and_upsert(authorization: str | None) -> tuple[str | None, dict | None
     google_sub = claims["sub"]
     if not db.is_enabled():
         return google_sub, None
-    user_row = db.upsert_user(
+    user_row = await asyncio.to_thread(
+        db.upsert_user,
         google_sub,
         email=claims.get("email"),
         name=claims.get("name"),
@@ -246,7 +250,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
         "%(duration)s",
         url,
     ]
-    code, stdout, stderr = await _run_subprocess(cmd, 60, req_id, "yt-dlp-duration")
+    code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-duration")
     if code != 0:
         logger.info("[%s] duration probe failed: %s", req_id, stderr.decode(errors="replace"))
         return None
@@ -386,7 +390,7 @@ async def metadata(
     url: str = Query(..., description="YouTube URL"),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    user_sub, _user_row = _auth_and_upsert(authorization)
+    user_sub, _user_row = await _auth_and_upsert(authorization)
     # Burst cap: signed-in users can't spam yt-dlp subprocesses by hammering
     # this endpoint. Generous enough that a normal page load (one call per
     # download) is never affected.
@@ -417,7 +421,7 @@ async def metadata(
         "--no-playlist",
         url,
     ]
-    code, stdout, stderr = await _run_subprocess(cmd, 60, req_id, "yt-dlp-metadata")
+    code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
     if code != 0:
         logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=400, detail="Could not read video metadata.")
@@ -449,7 +453,7 @@ async def download(
     ),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    user_sub, user_row = _auth_and_upsert(authorization)
+    user_sub, user_row = await _auth_and_upsert(authorization)
 
     # Validate URL BEFORE consuming quota — a bad URL is the caller's fault
     # but shouldn't burn one of their daily downloads.
@@ -476,11 +480,14 @@ async def download(
     #   - Supabase RPC `consume_quota` when DB is configured (per-user limit
     #     in the `users` table, persisted across restarts, supports overrides)
     #   - In-memory _download_rate otherwise (DEV / single-process fallback)
+    # Track whether we actually incremented a counter. Only refund when this
+    # is True — refunding on a denied (429) consume would credit the user.
+    quota_consumed = False
     used_db_quota = False
     remaining: int | None = None
     if user_sub is not None:
         if user_row is not None:
-            result = db.consume_quota(user_row["id"])
+            result = await asyncio.to_thread(db.consume_quota, user_row["id"])
             if result is None:
                 # RPC failed despite Supabase being configured — fall back to
                 # in-memory limiter so we still meter the request.
@@ -490,8 +497,8 @@ async def download(
                         status_code=429,
                         detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
                     )
+                quota_consumed = True
             else:
-                used_db_quota = True
                 if not result.get("allowed"):
                     raise HTTPException(
                         status_code=429,
@@ -500,6 +507,8 @@ async def download(
                             f"({result.get('limit', '?')}). Try again tomorrow."
                         ),
                     )
+                used_db_quota = True
+                quota_consumed = True
                 remaining = max(0, int(result.get("limit", 0)) - int(result.get("used", 0)))
         else:
             allowed, remaining = await _download_rate.consume(user_sub)
@@ -508,6 +517,7 @@ async def download(
                     status_code=429,
                     detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
                 )
+            quota_consumed = True
 
     # Match the extension's slider: clamp to step 0.1 using half-away-from-zero
     # rounding (1.25 -> 1.3, not 1.2 as Python's banker's-rounding `round` gives).
@@ -515,23 +525,23 @@ async def download(
     pitch_factor = 2 ** (pitch / 12)
     semitones, cents = db.split_pitch_to_semitones_cents(pitch)
 
-    def _refund_quota() -> None:
-        """Roll back the quota slot we just consumed."""
-        if user_sub is None:
+    async def _refund_quota_if_consumed() -> None:
+        """Roll back the quota slot we just consumed, if any.
+
+        Guarded by `quota_consumed` so we don't refund on a denied (429)
+        request — that would credit the user a slot they never used.
+        """
+        if user_sub is None or not quota_consumed:
             return
         if used_db_quota and user_row is not None:
-            db.refund_quota(user_row["id"])
+            await asyncio.to_thread(db.refund_quota, user_row["id"])
         else:
-            # _download_rate.refund is async; schedule it inline below.
-            pass
-
-    async def _refund_inmem_if_needed() -> None:
-        if user_sub is not None and not used_db_quota:
             await _download_rate.refund(user_sub)
 
-    def _record_failed() -> None:
+    async def _record_failed() -> None:
         if user_row is not None:
-            db.record_download(
+            await asyncio.to_thread(
+                db.record_download,
                 user_id=user_row["id"],
                 youtube_url=url,
                 semitones=semitones,
@@ -555,7 +565,8 @@ async def download(
         if cached is not None:
             logger.info("[%s] cache HIT video=%s pitch=%+.1f bytes=%d", req_id, video_id, pitch, len(cached))
             if user_row is not None:
-                db.record_download(
+                await asyncio.to_thread(
+                    db.record_download,
                     user_id=user_row["id"],
                     youtube_url=url,
                     semitones=semitones,
@@ -589,7 +600,8 @@ async def download(
         # Success — persist a "success" download row. Counters were already
         # incremented atomically inside consume_quota.
         if user_row is not None:
-            db.record_download(
+            await asyncio.to_thread(
+                db.record_download,
                 user_id=user_row["id"],
                 youtube_url=url,
                 semitones=semitones,
@@ -609,21 +621,18 @@ async def download(
         delivered = True
         return response
     except HTTPException:
-        _refund_quota()
-        await _refund_inmem_if_needed()
-        _record_failed()
+        await _refund_quota_if_consumed()
+        await _record_failed()
         raise
     except asyncio.CancelledError:
         logger.info("[%s] request cancelled by client", req_id)
-        _refund_quota()
-        await _refund_inmem_if_needed()
-        _record_failed()
+        await _refund_quota_if_consumed()
+        await _record_failed()
         raise
     except Exception as e:
         logger.exception("[%s] unexpected error", req_id)
-        _refund_quota()
-        await _refund_inmem_if_needed()
-        _record_failed()
+        await _refund_quota_if_consumed()
+        await _record_failed()
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error (ref: {req_id}).",
@@ -644,7 +653,8 @@ async def me(authorization: str | None = Header(None, alias="Authorization")):
     if claims is None:
         # DEV mode (auth disabled). Behave like an anonymous session.
         return {"signed_in": False}
-    user_row = db.upsert_user(
+    user_row = await asyncio.to_thread(
+        db.upsert_user,
         claims["sub"],
         email=claims.get("email"),
         name=claims.get("name"),

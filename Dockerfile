@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && ffmpeg -hide_banner -filters 2>/dev/null | grep -q rubberband \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
