@@ -602,6 +602,12 @@
       display: flex; align-items: center; justify-content: center;
       cursor: pointer;
     }
+    /* When the real (invisible) Google button receives focus, surface it on
+       the visible pill behind it so keyboard users see where they are. */
+    .dl-google-btn-wrap:focus-within .dl-google-btn-visible {
+      outline: 2px solid var(--color-ink);
+      outline-offset: 3px;
+    }
     .dl-signin-btn-row { display: flex; justify-content: center; }
     .dl-signin-error {
       margin-top: 14px;
@@ -687,7 +693,7 @@
       </div>
       <div class="dl-signin-error" id="dl-signin-error"></div>
       <div class="dl-signin-foot">
-        We only store your Google ID to count downloads — no email, no profile data.
+        Your Google sign-in token stays in this browser so you don't have to sign in every time. We use the name and avatar from it to show who is signed in, and your Google account ID to count downloads.
       </div>
     </div>
   </div>
@@ -1025,6 +1031,14 @@
       function openSignIn() {
         if (AUTH_DISABLED) return;
         signinOverlay.classList.add('is-open');
+        // Move keyboard focus into the dialog so a tab user lands directly
+        // on the sign-in control rather than the page behind the overlay.
+        requestAnimationFrame(() => {
+          const target = signinBtn.querySelector('iframe, [role="button"], button, [tabindex]') || signinBtn;
+          if (target && typeof target.focus === 'function') {
+            try { target.focus(); } catch (_) {}
+          }
+        });
       }
       function closeSignIn() {
         signinOverlay.classList.remove('is-open');

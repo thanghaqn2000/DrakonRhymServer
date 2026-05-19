@@ -304,6 +304,10 @@
       display: flex; align-items: center; justify-content: center;
       cursor: pointer;
     }
+    .dr-google-btn-wrap:focus-within .dr-google-btn-visible {
+      outline: 2px solid var(--color-ink);
+      outline-offset: 3px;
+    }
     .dr-signin-btn-row {
       display: flex; justify-content: center;
     }
@@ -565,6 +569,12 @@
         if (AUTH_DISABLED) return;
         errorEl.textContent = '';
         overlay.classList.add('is-open');
+        requestAnimationFrame(() => {
+          const target = googleBtnEl.querySelector('iframe, [role="button"], button, [tabindex]') || googleBtnEl;
+          if (target && typeof target.focus === 'function') {
+            try { target.focus(); } catch (_) {}
+          }
+        });
       }
       function closeOverlay() {
         overlay.classList.remove('is-open');
