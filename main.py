@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # any os.getenv() call below so the rest of the module sees the values.
 load_dotenv()
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from starlette.background import BackgroundTask
 
+import cache
 import db
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,6 +55,7 @@ def _origins_env(name: str, default: str) -> list[str]:
 MAX_CONCURRENT = _positive_int_env("DRAKON_MAX_CONCURRENT", "2")
 YT_DLP_TIMEOUT = _positive_int_env("DRAKON_YT_DLP_TIMEOUT", "300")
 FFMPEG_TIMEOUT = _positive_int_env("DRAKON_FFMPEG_TIMEOUT", "600")
+MAX_DURATION_SECONDS = _positive_int_env("DRAKON_MAX_DURATION_SECONDS", "420")
 RATE_LIMIT_PER_DAY = _positive_int_env("DRAKON_RATE_LIMIT_PER_DAY", "20")
 ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
@@ -182,7 +184,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-Pitch-Applied", "X-Quota-Remaining"],
+    expose_headers=["Content-Disposition", "X-Pitch-Applied", "X-Quota-Remaining", "X-Cache"],
 )
 
 
@@ -224,6 +226,38 @@ async def _run_subprocess(
     return proc.returncode, stdout, stderr
 
 
+async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
+    """Lightweight yt-dlp call that prints only the video duration.
+
+    Returns the duration as an integer, or None if it couldn't be parsed.
+    Used as a pre-flight check so we can reject videos that exceed
+    MAX_DURATION_SECONDS before paying for the full download + processing.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-warnings",
+        "--no-playlist",
+        "--socket-timeout",
+        "20",
+        "--skip-download",
+        "--print",
+        "%(duration)s",
+        url,
+    ]
+    code, stdout, stderr = await _run_subprocess(cmd, 60, req_id, "yt-dlp-duration")
+    if code != 0:
+        logger.info("[%s] duration probe failed: %s", req_id, stderr.decode(errors="replace"))
+        return None
+    raw = stdout.decode(errors="replace").strip().splitlines()[0] if stdout else ""
+    try:
+        return int(float(raw))
+    except (ValueError, IndexError):
+        logger.info("[%s] could not parse duration %r", req_id, raw)
+        return None
+
+
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
     output_template = str(workdir / "source.%(ext)s")
     cmd = [
@@ -236,6 +270,10 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "30",
         "--retries",
         "2",
+        # Defence-in-depth: also enforce the duration cap inside yt-dlp so
+        # even a direct API call that skipped /api/metadata gets rejected.
+        "--match-filter",
+        f"duration<={MAX_DURATION_SECONDS}",
         "-f",
         "bestaudio/best",
         "-x",
@@ -254,7 +292,12 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
 
     candidates = list(workdir.glob("source.*"))
     if not candidates:
-        raise HTTPException(status_code=500, detail="Downloaded file not found.")
+        # yt-dlp ran cleanly but skipped (most commonly because of the
+        # duration filter). Surface that as a clear 400.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
+        )
     return candidates[0]
 
 
@@ -416,6 +459,19 @@ async def download(
             detail="Invalid URL — only YouTube domains are accepted.",
         )
 
+    # Pre-flight duration probe so an over-long video gets rejected with a
+    # clear 400 BEFORE we consume quota and BEFORE we pay for a full
+    # download. yt-dlp also enforces this via --match-filter inside
+    # _download_audio (defence in depth), but doing it up front avoids a
+    # quota debit on too-long videos.
+    probe_req_id = uuid.uuid4().hex[:8]
+    duration = await _probe_duration_seconds(url, probe_req_id)
+    if duration is not None and duration > MAX_DURATION_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
+        )
+
     # Quota source of truth:
     #   - Supabase RPC `consume_quota` when DB is configured (per-user limit
     #     in the `users` table, persisted across restarts, supports overrides)
@@ -484,14 +540,51 @@ async def download(
             )
 
     req_id = uuid.uuid4().hex[:8]
+    video_id = cache.extract_video_id(url)
+    filename = f"drakonrhym_{pitch:+.1f}st.mp3"
+
+    def _success_headers() -> dict[str, str]:
+        h = {"X-Pitch-Applied": f"{pitch:.1f}"}
+        if remaining is not None:
+            h["X-Quota-Remaining"] = str(remaining)
+        return h
+
+    # ---- Cache hit path: skip yt-dlp + ffmpeg entirely ----
+    if video_id is not None:
+        cached = await cache.get(video_id, pitch)
+        if cached is not None:
+            logger.info("[%s] cache HIT video=%s pitch=%+.1f bytes=%d", req_id, video_id, pitch, len(cached))
+            if user_row is not None:
+                db.record_download(
+                    user_id=user_row["id"],
+                    youtube_url=url,
+                    semitones=semitones,
+                    cents=cents,
+                    status="success",
+                )
+            headers = _success_headers()
+            headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+            headers["X-Cache"] = "HIT"
+            return Response(content=cached, media_type="audio/mpeg", headers=headers)
+
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
     delivered = False
     try:
         async with _download_semaphore:
-            logger.info("[%s] download url=%s pitch=%+.1f", req_id, url, pitch)
+            logger.info("[%s] download url=%s pitch=%+.1f cache=%s",
+                        req_id, url, pitch, "MISS" if video_id else "n/a")
             source = await _download_audio(url, workdir, req_id)
             output = workdir / f"shifted_{req_id}.mp3"
             await _apply_pitch_shift(source, output, pitch_factor, req_id)
+
+        # Populate cache for the next caller. Read once so we can both stream
+        # to the client and stash in Redis without re-reading the file.
+        if video_id is not None:
+            try:
+                blob = output.read_bytes()
+                await cache.set(video_id, pitch, blob)
+            except Exception:
+                logger.exception("[%s] cache populate failed", req_id)
 
         # Success — persist a "success" download row. Counters were already
         # incremented atomically inside consume_quota.
@@ -504,10 +597,8 @@ async def download(
                 status="success",
             )
 
-        filename = f"drakonrhym_{pitch:+.1f}st.mp3"
-        headers = {"X-Pitch-Applied": f"{pitch:.1f}"}
-        if remaining is not None:
-            headers["X-Quota-Remaining"] = str(remaining)
+        headers = _success_headers()
+        headers["X-Cache"] = "MISS"
         response = FileResponse(
             path=output,
             media_type="audio/mpeg",
