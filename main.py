@@ -17,13 +17,16 @@ from dotenv import load_dotenv
 # any os.getenv() call below so the rest of the module sees the values.
 load_dotenv()
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from starlette.background import BackgroundTask
+
+import cache
+import db
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -52,6 +55,7 @@ def _origins_env(name: str, default: str) -> list[str]:
 MAX_CONCURRENT = _positive_int_env("DRAKON_MAX_CONCURRENT", "2")
 YT_DLP_TIMEOUT = _positive_int_env("DRAKON_YT_DLP_TIMEOUT", "300")
 FFMPEG_TIMEOUT = _positive_int_env("DRAKON_FFMPEG_TIMEOUT", "600")
+MAX_DURATION_SECONDS = _positive_int_env("DRAKON_MAX_DURATION_SECONDS", "420")
 RATE_LIMIT_PER_DAY = _positive_int_env("DRAKON_RATE_LIMIT_PER_DAY", "20")
 ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
@@ -119,11 +123,11 @@ _download_rate = _RateLimiter(limit=RATE_LIMIT_PER_DAY, window_seconds=86400)
 _metadata_rate = _RateLimiter(limit=30, window_seconds=60)
 
 
-def _verify_google_id_token(authorization: str | None) -> str | None:
-    """Verify a Bearer ID token from the Authorization header.
+def _verify_google_id_token_claims(authorization: str | None) -> dict | None:
+    """Verify a Bearer ID token and return the full claims dict.
 
-    Returns the user's stable Google `sub` claim. Raises 401 on any failure.
-    No-op (returns None) when `GOOGLE_CLIENT_ID` is empty — DEV mode.
+    Raises 401 on any failure. Returns None when `GOOGLE_CLIENT_ID` is empty
+    (DEV mode — auth is disabled).
     """
     if not GOOGLE_CLIENT_ID:
         return None
@@ -140,10 +144,41 @@ def _verify_google_id_token(authorization: str | None) -> str | None:
     except ValueError as e:
         logger.info("Google token verification failed: %s", e)
         raise HTTPException(status_code=401, detail="Invalid Google token.") from e
-    sub = claims.get("sub")
-    if not sub:
+    if not claims.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject claim.")
-    return sub
+    return claims
+
+
+def _verify_google_id_token(authorization: str | None) -> str | None:
+    """Backwards-compatible wrapper that returns just the `sub` claim."""
+    claims = _verify_google_id_token_claims(authorization)
+    return claims.get("sub") if claims else None
+
+
+async def _auth_and_upsert(authorization: str | None) -> tuple[str | None, dict | None]:
+    """Verify the token and (if Supabase is configured) upsert the user row.
+
+    Returns (google_sub, user_row). `user_row` is None when Supabase is off
+    or the upsert failed; callers should treat that as 'persistence disabled,
+    fall back to anonymous behaviour'.
+
+    `db.upsert_user` is a synchronous HTTP call to Supabase, so we offload
+    it to a worker thread to keep the event loop free.
+    """
+    claims = _verify_google_id_token_claims(authorization)
+    if claims is None:
+        return None, None
+    google_sub = claims["sub"]
+    if not db.is_enabled():
+        return google_sub, None
+    user_row = await asyncio.to_thread(
+        db.upsert_user,
+        google_sub,
+        email=claims.get("email"),
+        name=claims.get("name"),
+        avatar_url=claims.get("picture"),
+    )
+    return google_sub, user_row
 
 app = FastAPI(title="DrakonRhymServer", version="0.1.0")
 
@@ -153,7 +188,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-Pitch-Applied", "X-Quota-Remaining"],
+    expose_headers=["Content-Disposition", "X-Pitch-Applied", "X-Quota-Remaining", "X-Cache"],
 )
 
 
@@ -195,6 +230,38 @@ async def _run_subprocess(
     return proc.returncode, stdout, stderr
 
 
+async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
+    """Lightweight yt-dlp call that prints only the video duration.
+
+    Returns the duration as an integer, or None if it couldn't be parsed.
+    Used as a pre-flight check so we can reject videos that exceed
+    MAX_DURATION_SECONDS before paying for the full download + processing.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-warnings",
+        "--no-playlist",
+        "--socket-timeout",
+        "20",
+        "--skip-download",
+        "--print",
+        "%(duration)s",
+        url,
+    ]
+    code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-duration")
+    if code != 0:
+        logger.info("[%s] duration probe failed: %s", req_id, stderr.decode(errors="replace"))
+        return None
+    raw = stdout.decode(errors="replace").strip().splitlines()[0] if stdout else ""
+    try:
+        return int(float(raw))
+    except (ValueError, IndexError):
+        logger.info("[%s] could not parse duration %r", req_id, raw)
+        return None
+
+
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
     output_template = str(workdir / "source.%(ext)s")
     cmd = [
@@ -207,6 +274,10 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "30",
         "--retries",
         "2",
+        # Defence-in-depth: also enforce the duration cap inside yt-dlp so
+        # even a direct API call that skipped /api/metadata gets rejected.
+        "--match-filter",
+        f"duration<={MAX_DURATION_SECONDS}",
         "-f",
         "bestaudio/best",
         "-x",
@@ -225,7 +296,12 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
 
     candidates = list(workdir.glob("source.*"))
     if not candidates:
-        raise HTTPException(status_code=500, detail="Downloaded file not found.")
+        # yt-dlp ran cleanly but skipped (most commonly because of the
+        # duration filter). Surface that as a clear 400.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
+        )
     return candidates[0]
 
 
@@ -314,7 +390,7 @@ async def metadata(
     url: str = Query(..., description="YouTube URL"),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    user_sub = _verify_google_id_token(authorization)
+    user_sub, _user_row = await _auth_and_upsert(authorization)
     # Burst cap: signed-in users can't spam yt-dlp subprocesses by hammering
     # this endpoint. Generous enough that a normal page load (one call per
     # download) is never affected.
@@ -345,7 +421,7 @@ async def metadata(
         "--no-playlist",
         url,
     ]
-    code, stdout, stderr = await _run_subprocess(cmd, 60, req_id, "yt-dlp-metadata")
+    code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
     if code != 0:
         logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=400, detail="Could not read video metadata.")
@@ -377,7 +453,7 @@ async def download(
     ),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    user_sub = _verify_google_id_token(authorization)
+    user_sub, user_row = await _auth_and_upsert(authorization)
 
     # Validate URL BEFORE consuming quota — a bad URL is the caller's fault
     # but shouldn't burn one of their daily downloads.
@@ -387,35 +463,154 @@ async def download(
             detail="Invalid URL — only YouTube domains are accepted.",
         )
 
+    # Pre-flight duration probe so an over-long video gets rejected with a
+    # clear 400 BEFORE we consume quota and BEFORE we pay for a full
+    # download. yt-dlp also enforces this via --match-filter inside
+    # _download_audio (defence in depth), but doing it up front avoids a
+    # quota debit on too-long videos.
+    probe_req_id = uuid.uuid4().hex[:8]
+    duration = await _probe_duration_seconds(url, probe_req_id)
+    if duration is not None and duration > MAX_DURATION_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
+        )
+
+    # Quota source of truth:
+    #   - Supabase RPC `consume_quota` when DB is configured (per-user limit
+    #     in the `users` table, persisted across restarts, supports overrides)
+    #   - In-memory _download_rate otherwise (DEV / single-process fallback)
+    # Track whether we actually incremented a counter. Only refund when this
+    # is True — refunding on a denied (429) consume would credit the user.
+    quota_consumed = False
+    used_db_quota = False
+    remaining: int | None = None
     if user_sub is not None:
-        allowed, remaining = await _download_rate.consume(user_sub)
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
-            )
-    else:
-        remaining = None
+        if user_row is not None:
+            result = await asyncio.to_thread(db.consume_quota, user_row["id"])
+            if result is None:
+                # RPC failed despite Supabase being configured — fall back to
+                # in-memory limiter so we still meter the request.
+                allowed, remaining = await _download_rate.consume(user_sub)
+                if not allowed:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
+                    )
+                quota_consumed = True
+            else:
+                if not result.get("allowed"):
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            f"Daily download limit reached "
+                            f"({result.get('limit', '?')}). Try again tomorrow."
+                        ),
+                    )
+                used_db_quota = True
+                quota_consumed = True
+                remaining = max(0, int(result.get("limit", 0)) - int(result.get("used", 0)))
+        else:
+            allowed, remaining = await _download_rate.consume(user_sub)
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Daily download limit reached ({RATE_LIMIT_PER_DAY}). Try again tomorrow.",
+                )
+            quota_consumed = True
 
     # Match the extension's slider: clamp to step 0.1 using half-away-from-zero
     # rounding (1.25 -> 1.3, not 1.2 as Python's banker's-rounding `round` gives).
     pitch = float(Decimal(str(pitch)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
     pitch_factor = 2 ** (pitch / 12)
+    semitones, cents = db.split_pitch_to_semitones_cents(pitch)
+
+    async def _refund_quota_if_consumed() -> None:
+        """Roll back the quota slot we just consumed, if any.
+
+        Guarded by `quota_consumed` so we don't refund on a denied (429)
+        request — that would credit the user a slot they never used.
+        """
+        if user_sub is None or not quota_consumed:
+            return
+        if used_db_quota and user_row is not None:
+            await asyncio.to_thread(db.refund_quota, user_row["id"])
+        else:
+            await _download_rate.refund(user_sub)
+
+    async def _record_failed() -> None:
+        if user_row is not None:
+            await asyncio.to_thread(
+                db.record_download,
+                user_id=user_row["id"],
+                youtube_url=url,
+                semitones=semitones,
+                cents=cents,
+                status="failed",
+            )
 
     req_id = uuid.uuid4().hex[:8]
+    video_id = cache.extract_video_id(url)
+    filename = f"drakonrhym_{pitch:+.1f}st.mp3"
+
+    def _success_headers() -> dict[str, str]:
+        h = {"X-Pitch-Applied": f"{pitch:.1f}"}
+        if remaining is not None:
+            h["X-Quota-Remaining"] = str(remaining)
+        return h
+
+    # ---- Cache hit path: skip yt-dlp + ffmpeg entirely ----
+    if video_id is not None:
+        cached = await cache.get(video_id, pitch)
+        if cached is not None:
+            logger.info("[%s] cache HIT video=%s pitch=%+.1f bytes=%d", req_id, video_id, pitch, len(cached))
+            if user_row is not None:
+                await asyncio.to_thread(
+                    db.record_download,
+                    user_id=user_row["id"],
+                    youtube_url=url,
+                    semitones=semitones,
+                    cents=cents,
+                    status="success",
+                )
+            headers = _success_headers()
+            headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+            headers["X-Cache"] = "HIT"
+            return Response(content=cached, media_type="audio/mpeg", headers=headers)
+
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
     delivered = False
     try:
         async with _download_semaphore:
-            logger.info("[%s] download url=%s pitch=%+.1f", req_id, url, pitch)
+            logger.info("[%s] download url=%s pitch=%+.1f cache=%s",
+                        req_id, url, pitch, "MISS" if video_id else "n/a")
             source = await _download_audio(url, workdir, req_id)
             output = workdir / f"shifted_{req_id}.mp3"
             await _apply_pitch_shift(source, output, pitch_factor, req_id)
 
-        filename = f"drakonrhym_{pitch:+.1f}st.mp3"
-        headers = {"X-Pitch-Applied": f"{pitch:.1f}"}
-        if remaining is not None:
-            headers["X-Quota-Remaining"] = str(remaining)
+        # Populate cache for the next caller. Read once so we can both stream
+        # to the client and stash in Redis without re-reading the file.
+        if video_id is not None:
+            try:
+                blob = output.read_bytes()
+                await cache.set(video_id, pitch, blob)
+            except Exception:
+                logger.exception("[%s] cache populate failed", req_id)
+
+        # Success — persist a "success" download row. Counters were already
+        # incremented atomically inside consume_quota.
+        if user_row is not None:
+            await asyncio.to_thread(
+                db.record_download,
+                user_id=user_row["id"],
+                youtube_url=url,
+                semitones=semitones,
+                cents=cents,
+                status="success",
+            )
+
+        headers = _success_headers()
+        headers["X-Cache"] = "MISS"
         response = FileResponse(
             path=output,
             media_type="audio/mpeg",
@@ -426,21 +621,18 @@ async def download(
         delivered = True
         return response
     except HTTPException:
-        # The caller's quota was already consumed before we knew whether the
-        # video was actually fetchable. Refund so failed downloads don't eat
-        # their daily budget. Cancellations and unexpected 500s also refund.
-        if user_sub is not None:
-            await _download_rate.refund(user_sub)
+        await _refund_quota_if_consumed()
+        await _record_failed()
         raise
     except asyncio.CancelledError:
         logger.info("[%s] request cancelled by client", req_id)
-        if user_sub is not None:
-            await _download_rate.refund(user_sub)
+        await _refund_quota_if_consumed()
+        await _record_failed()
         raise
     except Exception as e:
         logger.exception("[%s] unexpected error", req_id)
-        if user_sub is not None:
-            await _download_rate.refund(user_sub)
+        await _refund_quota_if_consumed()
+        await _record_failed()
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error (ref: {req_id}).",
@@ -448,6 +640,46 @@ async def download(
     finally:
         if not delivered:
             _cleanup(workdir)
+
+
+@app.get("/api/me")
+async def me(authorization: str | None = Header(None, alias="Authorization")):
+    """Return the signed-in user's profile + current quota state.
+
+    Requires a valid bearer token. If Supabase is not configured, returns just
+    the claims from the Google token (no quota fields).
+    """
+    claims = _verify_google_id_token_claims(authorization)
+    if claims is None:
+        # DEV mode (auth disabled). Behave like an anonymous session.
+        return {"signed_in": False}
+    user_row = await asyncio.to_thread(
+        db.upsert_user,
+        claims["sub"],
+        email=claims.get("email"),
+        name=claims.get("name"),
+        avatar_url=claims.get("picture"),
+    )
+    if user_row is None:
+        return {
+            "signed_in": True,
+            "google_id": claims["sub"],
+            "email": claims.get("email"),
+            "name": claims.get("name"),
+            "avatar_url": claims.get("picture"),
+        }
+    return {
+        "signed_in": True,
+        "id": user_row["id"],
+        "google_id": user_row["google_id"],
+        "email": user_row.get("email"),
+        "name": user_row.get("name"),
+        "avatar_url": user_row.get("avatar_url"),
+        "download_count": user_row.get("download_count", 0),
+        "daily_download_limit": user_row.get("daily_download_limit", 0),
+        "daily_download_used": user_row.get("daily_download_used", 0),
+        "last_download_date": user_row.get("last_download_date"),
+    }
 
 
 if __name__ == "__main__":

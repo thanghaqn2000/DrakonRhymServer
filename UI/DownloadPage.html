@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DrakonRhym — Downloading audio</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
   <link rel="stylesheet" href="/assets/colors_and_type.css">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <meta name="drakon-google-client-id" content="{{DRAKON_GOOGLE_CLIENT_ID}}">
@@ -26,12 +28,11 @@
     }
     .dr-brand { display: flex; align-items: center; gap: 10px; }
     .dr-brand-mark {
-      width: 22px; height: 22px; border-radius: 50%;
-      background: var(--color-ink); color: var(--color-on-primary);
+      width: 36px; height: 36px;
       display: inline-flex; align-items: center; justify-content: center;
       flex-shrink: 0;
     }
-    .dr-brand-mark svg { width: 12px; height: 12px; }
+    .dr-brand-mark img { width: 100%; height: 100%; object-fit: contain; }
     .dr-brand-word {
       font-family: var(--font-display); font-weight: 300;
       font-size: 20px; letter-spacing: -0.4px; color: var(--color-ink);
@@ -703,9 +704,7 @@
     <div class="dr-nav-inner">
       <a class="dr-brand" href="/">
         <span class="dr-brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M5 12 L5 12"/><path d="M9 8 L9 16"/><path d="M13 5 L13 19"/><path d="M17 9 L17 15"/><path d="M21 12 L21 12"/>
-          </svg>
+          <img src="/assets/logo.png" alt="">
         </span>
         <span class="dr-brand-word">DrakonRhym</span>
       </a>

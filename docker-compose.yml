@@ -1,0 +1,48 @@
+# DrakonRhymServer — local Docker setup.
+#
+# Brings up:
+#   - redis  (used for the audio cache by `cache.py`)
+#   - app    (FastAPI server)
+#
+# Usage:
+#   docker compose up --build
+#
+# Configuration:
+#   - Secrets like SUPABASE_KEY and the Google OAuth client ID are read
+#     from the .env file in this directory (see .env.example).
+#   - REDIS_URL is overridden here to point at the `redis` service so the
+#     app talks to the sidecar container rather than localhost.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Cap memory and evict least-recently-used keys when full so a busy
+    # day can't blow up the host. Audio blobs (~5 MB each) sit in here
+    # until the per-key TTL expires (24h) or LRU evicts them.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override whatever the local .env had for REDIS_URL — inside the
+      # compose network the Redis hostname is the service name, not localhost.
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && ffmpeg -hide_banner -filters 2>/dev/null | grep -q rubberband \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -13,7 +14,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py ./
+COPY main.py db.py cache.py ./
+COPY UI/ ./UI/
+COPY assets/ ./assets/
+COPY db/ ./db/
 
 EXPOSE 8000
 
