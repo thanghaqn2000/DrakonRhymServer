@@ -40,6 +40,10 @@ services:
       # Override whatever the local .env had for REDIS_URL — inside the
       # compose network the Redis hostname is the service name, not localhost.
       REDIS_URL: redis://redis:6379
+    # On VPS: create cookies.txt (Netscape format) on the host, set
+    # DRAKON_YT_DLP_COOKIES=/app/cookies.txt in .env, then uncomment:
+    volumes:
+      - ./cookies.txt:/app/cookies.txt:ro
     depends_on:
       redis:
         condition: service_healthy

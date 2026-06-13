@@ -37,3 +37,6 @@ drakonrhym_*/
 *.opus
 *.webm
 *.wav
+
+# YouTube session cookies (never commit)
+cookies.txt

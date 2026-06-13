@@ -59,6 +59,7 @@ MAX_DURATION_SECONDS = _positive_int_env("DRAKON_MAX_DURATION_SECONDS", "420")
 RATE_LIMIT_PER_DAY = _positive_int_env("DRAKON_RATE_LIMIT_PER_DAY", "20")
 ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
+YT_DLP_COOKIES = os.getenv("DRAKON_YT_DLP_COOKIES", "").strip()
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -75,6 +76,33 @@ if not GOOGLE_CLIENT_ID:
 
 _download_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _google_request = google_requests.Request()
+
+
+def _yt_dlp_cookie_args() -> list[str]:
+    """Return ``--cookies <path>`` when a Netscape cookie file is configured."""
+    if not YT_DLP_COOKIES:
+        return []
+    path = Path(YT_DLP_COOKIES)
+    if not path.is_file():
+        logger.warning(
+            "DRAKON_YT_DLP_COOKIES=%s is set but file not found — continuing without cookies",
+            YT_DLP_COOKIES,
+        )
+        return []
+    return ["--cookies", str(path)]
+
+
+def _build_yt_dlp_cmd(*args: str, url: str | None = None) -> list[str]:
+    cmd = [sys.executable, "-m", "yt_dlp", *_yt_dlp_cookie_args(), *args]
+    if url is not None:
+        cmd.append(url)
+    return cmd
+
+
+if YT_DLP_COOKIES and Path(YT_DLP_COOKIES).is_file():
+    logger.info("yt-dlp cookies enabled (%s)", YT_DLP_COOKIES)
+elif YT_DLP_COOKIES:
+    logger.warning("DRAKON_YT_DLP_COOKIES is set but cookie file is missing")
 
 
 class _RateLimiter:
@@ -237,10 +265,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
     Used as a pre-flight check so we can reject videos that exceed
     MAX_DURATION_SECONDS before paying for the full download + processing.
     """
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    cmd = _build_yt_dlp_cmd(
         "--no-warnings",
         "--no-playlist",
         "--socket-timeout",
@@ -248,8 +273,8 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
         "--skip-download",
         "--print",
         "%(duration)s",
-        url,
-    ]
+        url=url,
+    )
     code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-duration")
     if code != 0:
         logger.info("[%s] duration probe failed: %s", req_id, stderr.decode(errors="replace"))
@@ -264,10 +289,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
 
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
     output_template = str(workdir / "source.%(ext)s")
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    cmd = _build_yt_dlp_cmd(
         "--no-playlist",
         "--no-warnings",
         "--socket-timeout",
@@ -287,8 +309,8 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "0",
         "-o",
         output_template,
-        url,
-    ]
+        url=url,
+    )
     code, _, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp")
     if code != 0:
         logger.error("[%s] yt-dlp failed: %s", req_id, stderr.decode(errors="replace"))
@@ -409,18 +431,15 @@ async def metadata(
         )
 
     req_id = uuid.uuid4().hex[:8]
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    cmd = _build_yt_dlp_cmd(
         "--dump-single-json",
         "--skip-download",
         "--no-warnings",
         "--socket-timeout",
         "20",
         "--no-playlist",
-        url,
-    ]
+        url=url,
+    )
     code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
     if code != 0:
         logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
