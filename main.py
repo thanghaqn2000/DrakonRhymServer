@@ -59,6 +59,8 @@ MAX_DURATION_SECONDS = _positive_int_env("DRAKON_MAX_DURATION_SECONDS", "420")
 RATE_LIMIT_PER_DAY = _positive_int_env("DRAKON_RATE_LIMIT_PER_DAY", "20")
 ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
+YT_DLP_COOKIES_FILE = os.getenv("DRAKON_YT_DLP_COOKIES_FILE", "").strip()
+YT_DLP_COOKIES_FROM_BROWSER = os.getenv("DRAKON_YT_DLP_COOKIES_FROM_BROWSER", "").strip()
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -203,6 +205,18 @@ def _is_valid_youtube_url(url: str) -> bool:
     return host in ALLOWED_HOSTS
 
 
+def _yt_dlp_auth_args() -> list[str]:
+    if YT_DLP_COOKIES_FILE:
+        return ["--cookies", YT_DLP_COOKIES_FILE]
+    if YT_DLP_COOKIES_FROM_BROWSER:
+        return ["--cookies-from-browser", YT_DLP_COOKIES_FROM_BROWSER]
+    return []
+
+
+def _yt_dlp_cmd(*args: str) -> list[str]:
+    return [sys.executable, "-m", "yt_dlp", *_yt_dlp_auth_args(), *args]
+
+
 async def _run_subprocess(
     cmd: list[str], timeout: int, req_id: str, label: str
 ) -> tuple[int, bytes, bytes]:
@@ -237,10 +251,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
     Used as a pre-flight check so we can reject videos that exceed
     MAX_DURATION_SECONDS before paying for the full download + processing.
     """
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    cmd = _yt_dlp_cmd(
         "--no-warnings",
         "--no-playlist",
         "--socket-timeout",
@@ -249,7 +260,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
         "--print",
         "%(duration)s",
         url,
-    ]
+    )
     code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-duration")
     if code != 0:
         logger.info("[%s] duration probe failed: %s", req_id, stderr.decode(errors="replace"))
@@ -264,10 +275,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
 
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
     output_template = str(workdir / "source.%(ext)s")
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    cmd = _yt_dlp_cmd(
         "--no-playlist",
         "--no-warnings",
         "--socket-timeout",
@@ -288,7 +296,7 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "-o",
         output_template,
         url,
-    ]
+    )
     code, _, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp")
     if code != 0:
         logger.error("[%s] yt-dlp failed: %s", req_id, stderr.decode(errors="replace"))
@@ -409,10 +417,7 @@ async def metadata(
         )
 
     req_id = uuid.uuid4().hex[:8]
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    cmd = _yt_dlp_cmd(
         "--dump-single-json",
         "--skip-download",
         "--no-warnings",
@@ -420,7 +425,7 @@ async def metadata(
         "20",
         "--no-playlist",
         url,
-    ]
+    )
     code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
     if code != 0:
         logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
