@@ -61,7 +61,7 @@ ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
 YT_DLP_COOKIES_FILE = os.getenv("DRAKON_YT_DLP_COOKIES_FILE", "").strip()
 YT_DLP_COOKIES_FROM_BROWSER = os.getenv("DRAKON_YT_DLP_COOKIES_FROM_BROWSER", "").strip()
-YT_DLP_JS_RUNTIME = os.getenv("DRAKON_YT_DLP_JS_RUNTIME", "node").strip()
+YT_DLP_JS_RUNTIME = os.getenv("DRAKON_YT_DLP_JS_RUNTIME", "deno").strip()
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",

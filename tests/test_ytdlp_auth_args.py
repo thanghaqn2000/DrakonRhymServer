@@ -37,15 +37,14 @@ class YtDlpAuthArgsTests(unittest.TestCase):
         self.assertEqual(cmd[:5], [main.sys.executable, "-m", "yt_dlp", "--cookies-from-browser", "chrome"])
         self.assertEqual(cmd[-1], "--skip-download")
 
-    def test_ytdlp_cmd_enables_node_js_runtime_by_default(self):
+    def test_ytdlp_cmd_enables_deno_js_runtime_by_default(self):
         main.YT_DLP_COOKIES_FILE = ""
         main.YT_DLP_COOKIES_FROM_BROWSER = ""
-        main.YT_DLP_JS_RUNTIME = "node"
 
         cmd = main._yt_dlp_cmd("--skip-download")
 
         self.assertIn("--js-runtimes", cmd)
-        self.assertEqual(cmd[cmd.index("--js-runtimes") + 1], "node")
+        self.assertEqual(cmd[cmd.index("--js-runtimes") + 1], "deno")
         self.assertEqual(cmd[-1], "--skip-download")
 
     def test_ytdlp_cmd_prefers_cookie_file_when_both_auth_modes_are_configured(self):
