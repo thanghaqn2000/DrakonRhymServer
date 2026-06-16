@@ -40,6 +40,11 @@ services:
       # Override whatever the local .env had for REDIS_URL — inside the
       # compose network the Redis hostname is the service name, not localhost.
       REDIS_URL: redis://redis:6379
+      # If YouTube challenges the server IP, export browser cookies to
+      # ./cookies.txt and uncomment the volume below.
+      # DRAKON_YT_DLP_COOKIES_FILE: /run/secrets/youtube-cookies.txt
+    # volumes:
+    #   - ./cookies.txt:/run/secrets/youtube-cookies.txt:ro
     depends_on:
       redis:
         condition: service_healthy

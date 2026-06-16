@@ -30,6 +30,8 @@ tmp/
 temp/
 drakonrhym_*/
 *.log
+cookies.txt
+*.cookies.txt
 
 # Audio artifacts
 *.mp3
