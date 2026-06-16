@@ -81,6 +81,8 @@ class YtDlpAuthArgsTests(unittest.TestCase):
 
     def test_ytdlp_403_errors_trigger_hls_fallback(self):
         self.assertTrue(main._should_retry_with_hls_fallback(b"ERROR: HTTP Error 403: Forbidden"))
+        self.assertTrue(main._should_retry_with_hls_fallback(b"error: http error 403: forbidden"))
+        self.assertTrue(main._should_retry_with_hls_fallback(b"unable to download video data: 403 Forbidden"))
         self.assertTrue(main._should_retry_with_hls_fallback(b"unable to download video data: HTTP Error 403"))
         self.assertFalse(main._should_retry_with_hls_fallback(b"ERROR: Sign in to confirm you're not a bot"))
 
@@ -88,7 +90,7 @@ class YtDlpAuthArgsTests(unittest.TestCase):
         args = main._download_audio_args("/tmp/source.%(ext)s", main.YT_DLP_HLS_FALLBACK_FORMAT)
 
         self.assertIn("-f", args)
-        self.assertEqual(args[args.index("-f") + 1], "91/92/93/94/95/96")
+        self.assertEqual(args[args.index("-f") + 1], main.YT_DLP_HLS_FALLBACK_FORMAT)
         self.assertIn("-x", args)
         self.assertIn("--audio-format", args)
 

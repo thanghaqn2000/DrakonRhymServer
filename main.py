@@ -359,7 +359,8 @@ def _download_audio_args(output_template: str, format_selector: str) -> list[str
 
 
 def _should_retry_with_hls_fallback(stderr: bytes) -> bool:
-    return b"HTTP Error 403" in stderr
+    text = stderr.decode(errors="ignore").lower()
+    return "http error 403" in text or "403 forbidden" in text
 
 
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
