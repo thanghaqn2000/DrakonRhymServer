@@ -33,6 +33,19 @@ class YtDlpAuthArgsTests(unittest.TestCase):
         self.assertEqual(cmd[:5], [main.sys.executable, "-m", "yt_dlp", "--cookies-from-browser", "chrome"])
         self.assertEqual(cmd[-1], "--skip-download")
 
+    def test_ytdlp_cmd_prefers_cookie_file_when_both_auth_modes_are_configured(self):
+        main.YT_DLP_COOKIES_FILE = "/run/secrets/youtube-cookies.txt"
+        main.YT_DLP_COOKIES_FROM_BROWSER = "chrome"
+
+        cmd = main._yt_dlp_cmd("--skip-download")
+
+        self.assertEqual(
+            cmd[:5],
+            [main.sys.executable, "-m", "yt_dlp", "--cookies", "/run/secrets/youtube-cookies.txt"],
+        )
+        self.assertNotIn("--cookies-from-browser", cmd)
+        self.assertNotIn("chrome", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

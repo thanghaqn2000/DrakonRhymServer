@@ -42,9 +42,9 @@ services:
       REDIS_URL: redis://redis:6379
       # If YouTube challenges the server IP, export browser cookies to
       # ./cookies.txt and uncomment the volume below.
-      DRAKON_YT_DLP_COOKIES_FILE: /run/secrets/youtube-cookies.txt
-    volumes:
-      - ./cookies.txt:/run/secrets/youtube-cookies.txt:ro
+      # DRAKON_YT_DLP_COOKIES_FILE: /run/secrets/youtube-cookies.txt
+    # volumes:
+    #   - ./cookies.txt:/run/secrets/youtube-cookies.txt:ro
     depends_on:
       redis:
         condition: service_healthy
