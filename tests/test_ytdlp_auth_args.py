@@ -9,10 +9,12 @@ class YtDlpAuthArgsTests(unittest.TestCase):
     def setUp(self):
         self.old_cookie_file = getattr(main, "YT_DLP_COOKIES_FILE", "")
         self.old_cookies_from_browser = getattr(main, "YT_DLP_COOKIES_FROM_BROWSER", "")
+        self.old_js_runtime = getattr(main, "YT_DLP_JS_RUNTIME", "")
 
     def tearDown(self):
         main.YT_DLP_COOKIES_FILE = self.old_cookie_file
         main.YT_DLP_COOKIES_FROM_BROWSER = self.old_cookies_from_browser
+        main.YT_DLP_JS_RUNTIME = self.old_js_runtime
 
     def test_ytdlp_cmd_includes_configured_cookie_file(self):
         main.YT_DLP_COOKIES_FILE = "/run/secrets/youtube-cookies.txt"
@@ -33,6 +35,17 @@ class YtDlpAuthArgsTests(unittest.TestCase):
         cmd = main._yt_dlp_cmd("--skip-download")
 
         self.assertEqual(cmd[:5], [main.sys.executable, "-m", "yt_dlp", "--cookies-from-browser", "chrome"])
+        self.assertEqual(cmd[-1], "--skip-download")
+
+    def test_ytdlp_cmd_enables_node_js_runtime_by_default(self):
+        main.YT_DLP_COOKIES_FILE = ""
+        main.YT_DLP_COOKIES_FROM_BROWSER = ""
+        main.YT_DLP_JS_RUNTIME = "node"
+
+        cmd = main._yt_dlp_cmd("--skip-download")
+
+        self.assertIn("--js-runtimes", cmd)
+        self.assertEqual(cmd[cmd.index("--js-runtimes") + 1], "node")
         self.assertEqual(cmd[-1], "--skip-download")
 
     def test_ytdlp_cmd_prefers_cookie_file_when_both_auth_modes_are_configured(self):
