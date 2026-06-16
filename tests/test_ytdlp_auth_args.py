@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import main
 
@@ -77,6 +78,42 @@ class YtDlpAuthArgsTests(unittest.TestCase):
                 cmd[:5],
                 [main.sys.executable, "-m", "yt_dlp", "--cookies", str(copied)],
             )
+
+    def test_ytdlp_403_errors_trigger_hls_fallback(self):
+        self.assertTrue(main._should_retry_with_hls_fallback(b"ERROR: HTTP Error 403: Forbidden"))
+        self.assertTrue(main._should_retry_with_hls_fallback(b"unable to download video data: HTTP Error 403"))
+        self.assertFalse(main._should_retry_with_hls_fallback(b"ERROR: Sign in to confirm you're not a bot"))
+
+    def test_ytdlp_download_args_can_use_hls_fallback_format(self):
+        args = main._download_audio_args("/tmp/source.%(ext)s", main.YT_DLP_HLS_FALLBACK_FORMAT)
+
+        self.assertIn("-f", args)
+        self.assertEqual(args[args.index("-f") + 1], "91/92/93/94/95/96")
+        self.assertIn("-x", args)
+        self.assertIn("--audio-format", args)
+
+
+class DownloadAudioFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_download_audio_retries_hls_fallback_after_403(self):
+        with TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            calls = []
+
+            async def fake_run_ytdlp(args, timeout, req_id, label, cookie_workdir=None):
+                calls.append((args, label))
+                if len(calls) == 1:
+                    return 1, b"", b"ERROR: unable to download video data: HTTP Error 403: Forbidden"
+                (workdir / "source.mp3").write_bytes(b"mp3")
+                return 0, b"", b""
+
+            with patch.object(main, "_run_ytdlp", side_effect=fake_run_ytdlp):
+                result = await main._download_audio("https://www.youtube.com/watch?v=abc", workdir, "req123")
+
+            self.assertEqual(result, workdir / "source.mp3")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][0][calls[0][0].index("-f") + 1], main.YT_DLP_PRIMARY_FORMAT)
+            self.assertEqual(calls[1][0][calls[1][0].index("-f") + 1], main.YT_DLP_HLS_FALLBACK_FORMAT)
+            self.assertEqual(calls[1][1], "yt-dlp-hls-fallback")
 
 
 if __name__ == "__main__":
