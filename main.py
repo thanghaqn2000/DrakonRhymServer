@@ -205,7 +205,9 @@ def _is_valid_youtube_url(url: str) -> bool:
     return host in ALLOWED_HOSTS
 
 
-def _yt_dlp_auth_args() -> list[str]:
+def _yt_dlp_auth_args(cookies_file: str | None = None) -> list[str]:
+    if cookies_file:
+        return ["--cookies", cookies_file]
     if YT_DLP_COOKIES_FILE:
         return ["--cookies", YT_DLP_COOKIES_FILE]
     if YT_DLP_COOKIES_FROM_BROWSER:
@@ -213,8 +215,15 @@ def _yt_dlp_auth_args() -> list[str]:
     return []
 
 
-def _yt_dlp_cmd(*args: str) -> list[str]:
-    return [sys.executable, "-m", "yt_dlp", *_yt_dlp_auth_args(), *args]
+def _yt_dlp_cmd(*args: str, cookies_file: str | None = None) -> list[str]:
+    return [sys.executable, "-m", "yt_dlp", *_yt_dlp_auth_args(cookies_file), *args]
+
+
+def _copy_ytdlp_cookies(source: Path, workdir: Path, req_id: str) -> Path:
+    cookie_copy = workdir / f"yt_dlp_cookies_{req_id}.txt"
+    shutil.copyfile(source, cookie_copy)
+    cookie_copy.chmod(0o600)
+    return cookie_copy
 
 
 async def _run_subprocess(
@@ -244,6 +253,42 @@ async def _run_subprocess(
     return proc.returncode, stdout, stderr
 
 
+async def _run_ytdlp(
+    args: list[str],
+    timeout: int,
+    req_id: str,
+    label: str,
+    cookie_workdir: Path | None = None,
+) -> tuple[int, bytes, bytes]:
+    temp_cookie_dir: Path | None = None
+    copied_cookie: Path | None = None
+
+    if YT_DLP_COOKIES_FILE:
+        if cookie_workdir is None:
+            temp_cookie_dir = Path(tempfile.mkdtemp(prefix="drakonrhym_cookies_"))
+            cookie_workdir = temp_cookie_dir
+        try:
+            copied_cookie = _copy_ytdlp_cookies(Path(YT_DLP_COOKIES_FILE), cookie_workdir, req_id)
+        except OSError as e:
+            logger.exception("[%s] failed to prepare yt-dlp cookies file", req_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Configured YouTube cookies file is not readable.",
+            ) from e
+
+    cmd = _yt_dlp_cmd(
+        *args,
+        cookies_file=str(copied_cookie) if copied_cookie is not None else None,
+    )
+    try:
+        return await _run_subprocess(cmd, timeout, req_id, label)
+    finally:
+        if copied_cookie is not None:
+            copied_cookie.unlink(missing_ok=True)
+        if temp_cookie_dir is not None:
+            _cleanup(temp_cookie_dir)
+
+
 async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
     """Lightweight yt-dlp call that prints only the video duration.
 
@@ -251,7 +296,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
     Used as a pre-flight check so we can reject videos that exceed
     MAX_DURATION_SECONDS before paying for the full download + processing.
     """
-    cmd = _yt_dlp_cmd(
+    args = [
         "--no-warnings",
         "--no-playlist",
         "--socket-timeout",
@@ -260,8 +305,8 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
         "--print",
         "%(duration)s",
         url,
-    )
-    code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-duration")
+    ]
+    code, stdout, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp-duration")
     if code != 0:
         logger.info("[%s] duration probe failed: %s", req_id, stderr.decode(errors="replace"))
         return None
@@ -275,7 +320,7 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
 
 async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
     output_template = str(workdir / "source.%(ext)s")
-    cmd = _yt_dlp_cmd(
+    args = [
         "--no-playlist",
         "--no-warnings",
         "--socket-timeout",
@@ -296,8 +341,8 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "-o",
         output_template,
         url,
-    )
-    code, _, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp")
+    ]
+    code, _, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp", workdir)
     if code != 0:
         logger.error("[%s] yt-dlp failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=400, detail="Failed to download audio from the given URL.")
@@ -417,7 +462,7 @@ async def metadata(
         )
 
     req_id = uuid.uuid4().hex[:8]
-    cmd = _yt_dlp_cmd(
+    args = [
         "--dump-single-json",
         "--skip-download",
         "--no-warnings",
@@ -425,8 +470,8 @@ async def metadata(
         "20",
         "--no-playlist",
         url,
-    )
-    code, stdout, stderr = await _run_subprocess(cmd, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
+    ]
+    code, stdout, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
     if code != 0:
         logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=400, detail="Could not read video metadata.")
