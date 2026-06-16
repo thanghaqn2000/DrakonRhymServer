@@ -61,6 +61,7 @@ ALLOWED_ORIGINS = _origins_env("DRAKON_ALLOWED_ORIGINS", "*")
 GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
 YT_DLP_COOKIES_FILE = os.getenv("DRAKON_YT_DLP_COOKIES_FILE", "").strip()
 YT_DLP_COOKIES_FROM_BROWSER = os.getenv("DRAKON_YT_DLP_COOKIES_FROM_BROWSER", "").strip()
+YT_DLP_JS_RUNTIME = os.getenv("DRAKON_YT_DLP_JS_RUNTIME", "deno").strip()
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -215,8 +216,21 @@ def _yt_dlp_auth_args(cookies_file: str | None = None) -> list[str]:
     return []
 
 
+def _yt_dlp_js_runtime_args() -> list[str]:
+    if not YT_DLP_JS_RUNTIME:
+        return []
+    return ["--js-runtimes", YT_DLP_JS_RUNTIME]
+
+
 def _yt_dlp_cmd(*args: str, cookies_file: str | None = None) -> list[str]:
-    return [sys.executable, "-m", "yt_dlp", *_yt_dlp_auth_args(cookies_file), *args]
+    return [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        *_yt_dlp_auth_args(cookies_file),
+        *_yt_dlp_js_runtime_args(),
+        *args,
+    ]
 
 
 def _copy_ytdlp_cookies(source: Path, workdir: Path, req_id: str) -> Path:
