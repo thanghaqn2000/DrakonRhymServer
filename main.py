@@ -62,6 +62,8 @@ GOOGLE_CLIENT_ID = os.getenv("DRAKON_GOOGLE_CLIENT_ID", "").strip()
 YT_DLP_COOKIES_FILE = os.getenv("DRAKON_YT_DLP_COOKIES_FILE", "").strip()
 YT_DLP_COOKIES_FROM_BROWSER = os.getenv("DRAKON_YT_DLP_COOKIES_FROM_BROWSER", "").strip()
 YT_DLP_JS_RUNTIME = os.getenv("DRAKON_YT_DLP_JS_RUNTIME", "deno").strip()
+YT_DLP_PRIMARY_FORMAT = os.getenv("DRAKON_YT_DLP_PRIMARY_FORMAT", "bestaudio/best").strip()
+YT_DLP_HLS_FALLBACK_FORMAT = os.getenv("DRAKON_YT_DLP_HLS_FALLBACK_FORMAT", "91/92/93/94/95/96").strip()
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -332,9 +334,8 @@ async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
         return None
 
 
-async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
-    output_template = str(workdir / "source.%(ext)s")
-    args = [
+def _download_audio_args(output_template: str, format_selector: str) -> list[str]:
+    return [
         "--no-playlist",
         "--no-warnings",
         "--socket-timeout",
@@ -346,7 +347,7 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "--match-filter",
         f"duration<={MAX_DURATION_SECONDS}",
         "-f",
-        "bestaudio/best",
+        format_selector,
         "-x",
         "--audio-format",
         "mp3",
@@ -354,9 +355,34 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
         "0",
         "-o",
         output_template,
-        url,
     ]
+
+
+def _should_retry_with_hls_fallback(stderr: bytes) -> bool:
+    text = stderr.decode(errors="ignore").lower()
+    return "http error 403" in text or "403 forbidden" in text
+
+
+async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
+    output_template = str(workdir / "source.%(ext)s")
+    args = [*_download_audio_args(output_template, YT_DLP_PRIMARY_FORMAT), url]
     code, _, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp", workdir)
+    if code != 0 and YT_DLP_HLS_FALLBACK_FORMAT and _should_retry_with_hls_fallback(stderr):
+        logger.info(
+            "[%s] yt-dlp primary format failed with 403; retrying HLS fallback format %s",
+            req_id,
+            YT_DLP_HLS_FALLBACK_FORMAT,
+        )
+        for candidate in workdir.glob("source.*"):
+            candidate.unlink(missing_ok=True)
+        fallback_args = [*_download_audio_args(output_template, YT_DLP_HLS_FALLBACK_FORMAT), url]
+        code, _, stderr = await _run_ytdlp(
+            fallback_args,
+            YT_DLP_TIMEOUT,
+            req_id,
+            "yt-dlp-hls-fallback",
+            workdir,
+        )
     if code != 0:
         logger.error("[%s] yt-dlp failed: %s", req_id, stderr.decode(errors="replace"))
         raise HTTPException(status_code=400, detail="Failed to download audio from the given URL.")
