@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import main
 
@@ -45,6 +47,24 @@ class YtDlpAuthArgsTests(unittest.TestCase):
         )
         self.assertNotIn("--cookies-from-browser", cmd)
         self.assertNotIn("chrome", cmd)
+
+    def test_ytdlp_cookie_copy_uses_writable_cookie_file(self):
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source-cookies.txt"
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            source.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+            copied = main._copy_ytdlp_cookies(source, workdir, "abc123")
+            cmd = main._yt_dlp_cmd("--skip-download", cookies_file=str(copied))
+
+            self.assertNotEqual(copied, source)
+            self.assertEqual(copied.parent, workdir)
+            self.assertEqual(copied.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+            self.assertEqual(
+                cmd[:5],
+                [main.sys.executable, "-m", "yt_dlp", "--cookies", str(copied)],
+            )
 
 
 if __name__ == "__main__":
