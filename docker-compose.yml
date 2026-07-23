@@ -40,8 +40,10 @@ services:
       # Override whatever the local .env had for REDIS_URL — inside the
       # compose network the Redis hostname is the service name, not localhost.
       REDIS_URL: redis://redis:6379
-      # If YouTube challenges the server IP, export browser cookies to
-      # ./cookies.txt and uncomment the volume below.
+      # External provider keys (VIDEO_DOWNLOAD_API_KEY_*, TUNELIO_API_KEY,
+      # CAPTAPI_API_KEY_*) should live in .env. yt-dlp is now only the final
+      # fallback; if YouTube challenges the server IP, export browser cookies
+      # to ./cookies.txt and uncomment the volume below.
       # DRAKON_YT_DLP_COOKIES_FILE: /run/secrets/youtube-cookies.txt
     # volumes:
     #   - ./cookies.txt:/run/secrets/youtube-cookies.txt:ro

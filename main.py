@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -9,6 +11,7 @@ import time
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -27,6 +30,7 @@ from starlette.background import BackgroundTask
 
 import cache
 import db
+import youtube_external_download as youtube_download
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -128,7 +132,7 @@ _download_rate = _RateLimiter(limit=RATE_LIMIT_PER_DAY, window_seconds=86400)
 _metadata_rate = _RateLimiter(limit=30, window_seconds=60)
 
 
-def _verify_google_id_token_claims(authorization: str | None) -> dict | None:
+def _verify_google_id_token_claims(authorization: Optional[str]) -> Optional[dict]:
     """Verify a Bearer ID token and return the full claims dict.
 
     Raises 401 on any failure. Returns None when `GOOGLE_CLIENT_ID` is empty
@@ -154,13 +158,13 @@ def _verify_google_id_token_claims(authorization: str | None) -> dict | None:
     return claims
 
 
-def _verify_google_id_token(authorization: str | None) -> str | None:
+def _verify_google_id_token(authorization: Optional[str]) -> Optional[str]:
     """Backwards-compatible wrapper that returns just the `sub` claim."""
     claims = _verify_google_id_token_claims(authorization)
     return claims.get("sub") if claims else None
 
 
-async def _auth_and_upsert(authorization: str | None) -> tuple[str | None, dict | None]:
+async def _auth_and_upsert(authorization: Optional[str]) -> tuple[Optional[str], Optional[dict]]:
     """Verify the token and (if Supabase is configured) upsert the user row.
 
     Returns (google_sub, user_row). `user_row` is None when Supabase is off
@@ -193,7 +197,15 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-Pitch-Applied", "X-Quota-Remaining", "X-Cache"],
+    expose_headers=[
+        "Content-Disposition",
+        "X-Pitch-Applied",
+        "X-Quota-Remaining",
+        "X-Cache",
+        "X-Source-Provider",
+        "X-Processing-Time",
+        "X-Download-Strategy",
+    ],
 )
 
 
@@ -208,7 +220,7 @@ def _is_valid_youtube_url(url: str) -> bool:
     return host in ALLOWED_HOSTS
 
 
-def _yt_dlp_auth_args(cookies_file: str | None = None) -> list[str]:
+def _yt_dlp_auth_args(cookies_file: Optional[str] = None) -> list[str]:
     if cookies_file:
         return ["--cookies", cookies_file]
     if YT_DLP_COOKIES_FILE:
@@ -274,10 +286,10 @@ async def _run_ytdlp(
     timeout: int,
     req_id: str,
     label: str,
-    cookie_workdir: Path | None = None,
+    cookie_workdir: Optional[Path] = None,
 ) -> tuple[int, bytes, bytes]:
-    temp_cookie_dir: Path | None = None
-    copied_cookie: Path | None = None
+    temp_cookie_dir: Optional[Path] = None
+    copied_cookie: Optional[Path] = None
 
     if YT_DLP_COOKIES_FILE:
         if cookie_workdir is None:
@@ -305,13 +317,8 @@ async def _run_ytdlp(
             _cleanup(temp_cookie_dir)
 
 
-async def _probe_duration_seconds(url: str, req_id: str) -> int | None:
-    """Lightweight yt-dlp call that prints only the video duration.
-
-    Returns the duration as an integer, or None if it couldn't be parsed.
-    Used as a pre-flight check so we can reject videos that exceed
-    MAX_DURATION_SECONDS before paying for the full download + processing.
-    """
+async def _probe_duration_seconds_with_ytdlp(url: str, req_id: str) -> Optional[int]:
+    """Legacy yt-dlp-only duration probe used by the external chain fallback."""
     args = [
         "--no-warnings",
         "--no-playlist",
@@ -363,7 +370,54 @@ def _should_retry_with_hls_fallback(stderr: bytes) -> bool:
     return "http error 403" in text or "403 forbidden" in text
 
 
-async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
+async def _fetch_metadata_with_ytdlp(url: str) -> youtube_download.DownloadResult:
+    req_id = uuid.uuid4().hex[:8]
+    args = [
+        "--dump-single-json",
+        "--skip-download",
+        "--no-warnings",
+        "--socket-timeout",
+        "20",
+        "--no-playlist",
+        url,
+    ]
+    code, stdout, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
+    if code != 0:
+        decoded = stderr.decode(errors="replace")
+        logger.error("[%s] metadata fetch failed: %s", req_id, decoded)
+        if youtube_download._contains_bot_signal(decoded):
+            raise HTTPException(
+                status_code=400,
+                detail="YouTube blocked downloads from this server. Please try again later.",
+            )
+        raise HTTPException(status_code=400, detail="Could not read video metadata.")
+
+    try:
+        data = json.loads(stdout.decode())
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail="Failed to parse video metadata.") from e
+
+    duration = data.get("duration")
+    return youtube_download.DownloadResult(
+        path=None,
+        provider="youtube",
+        title=data.get("title"),
+        duration=int(duration) if isinstance(duration, (int, float)) else None,
+        filesize=None,
+        external_provider=None,
+        video_id=data.get("id"),
+        thumbnail=data.get("thumbnail"),
+        channel=data.get("uploader") or data.get("channel"),
+        duration_string=data.get("duration_string"),
+        view_count=data.get("view_count"),
+        download_url=None,
+        source_ext=data.get("ext"),
+    )
+
+
+async def _download_audio_with_ytdlp(
+    url: str, workdir: Path, req_id: str
+) -> youtube_download.DownloadResult:
     output_template = str(workdir / "source.%(ext)s")
     args = [*_download_audio_args(output_template, YT_DLP_PRIMARY_FORMAT), url]
     code, _, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp", workdir)
@@ -384,7 +438,13 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
             workdir,
         )
     if code != 0:
-        logger.error("[%s] yt-dlp failed: %s", req_id, stderr.decode(errors="replace"))
+        decoded = stderr.decode(errors="replace")
+        logger.error("[%s] yt-dlp failed: %s", req_id, decoded)
+        if youtube_download._contains_bot_signal(decoded):
+            raise HTTPException(
+                status_code=400,
+                detail="YouTube blocked downloads from this server. Please try again later.",
+            )
         raise HTTPException(status_code=400, detail="Failed to download audio from the given URL.")
 
     candidates = list(workdir.glob("source.*"))
@@ -395,7 +455,29 @@ async def _download_audio(url: str, workdir: Path, req_id: str) -> Path:
             status_code=400,
             detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
         )
-    return candidates[0]
+    source = candidates[0]
+    duration = await _probe_duration_seconds_with_ytdlp(url, req_id)
+    return youtube_download.DownloadResult(
+        path=source,
+        provider="youtube",
+        title=None,
+        duration=duration,
+        filesize=source.stat().st_size if source.exists() else None,
+        external_provider=None,
+        video_id=cache.extract_video_id(url),
+        thumbnail=None,
+        channel=None,
+        duration_string=None,
+        view_count=None,
+        download_url=None,
+        source_ext=source.suffix.lstrip(".") or None,
+    )
+
+
+YOUTUBE_DOWNLOADER = youtube_download.YouTubeDownloadService.from_env(
+    ytdlp_metadata_fetcher=_fetch_metadata_with_ytdlp,
+    ytdlp_downloader=_download_audio_with_ytdlp,
+)
 
 
 async def _apply_pitch_shift(
@@ -501,35 +583,34 @@ async def metadata(
             detail="Invalid URL — only YouTube domains are accepted.",
         )
 
-    req_id = uuid.uuid4().hex[:8]
-    args = [
-        "--dump-single-json",
-        "--skip-download",
-        "--no-warnings",
-        "--socket-timeout",
-        "20",
-        "--no-playlist",
-        url,
-    ]
-    code, stdout, stderr = await _run_ytdlp(args, YT_DLP_TIMEOUT, req_id, "yt-dlp-metadata")
-    if code != 0:
-        logger.error("[%s] metadata fetch failed: %s", req_id, stderr.decode(errors="replace"))
-        raise HTTPException(status_code=400, detail="Could not read video metadata.")
-
     try:
-        data = json.loads(stdout.decode())
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Failed to parse video metadata.")
+        data = await YOUTUBE_DOWNLOADER.fetch_metadata(url)
+    except youtube_download.ProviderDownloadError as e:
+        logger.error("metadata fetch failed: %s", e.message)
+        raise HTTPException(status_code=400, detail="Could not read video metadata.") from e
 
     return {
-        "title": data.get("title"),
-        "channel": data.get("uploader") or data.get("channel"),
-        "duration": data.get("duration"),
-        "duration_string": data.get("duration_string"),
-        "thumbnail": data.get("thumbnail"),
-        "video_id": data.get("id"),
-        "view_count": data.get("view_count"),
+        "title": data.title,
+        "channel": data.channel,
+        "duration": data.duration,
+        "duration_string": data.duration_string,
+        "thumbnail": data.thumbnail,
+        "video_id": data.video_id,
+        "view_count": data.view_count,
     }
+
+
+def _download_error_detail(exc: youtube_download.ProviderDownloadError) -> str:
+    kind = exc.error_kind
+    if kind == youtube_download.ErrorKind.FATAL_USER:
+        return "This video is unavailable or cannot be downloaded."
+    if kind in {youtube_download.ErrorKind.CLOUDFLARE, youtube_download.ErrorKind.BOT_BLOCKED}:
+        return "Temporary upstream block while fetching audio. Please try again shortly."
+    if kind == youtube_download.ErrorKind.TIMEOUT:
+        return "Download timed out while contacting upstream providers. Please try again."
+    if kind == youtube_download.ErrorKind.UNAVAILABLE:
+        return "Source audio is temporarily unavailable. Please try again later."
+    return "Failed to download audio from the given URL."
 
 
 @app.get("/api/download")
@@ -558,8 +639,12 @@ async def download(
     # download. yt-dlp also enforces this via --match-filter inside
     # _download_audio (defence in depth), but doing it up front avoids a
     # quota debit on too-long videos.
-    probe_req_id = uuid.uuid4().hex[:8]
-    duration = await _probe_duration_seconds(url, probe_req_id)
+    try:
+        metadata = await YOUTUBE_DOWNLOADER.fetch_metadata(url)
+    except youtube_download.ProviderDownloadError as e:
+        logger.error("metadata fetch failed before download: %s", e.message)
+        raise HTTPException(status_code=400, detail="Could not read video metadata.") from e
+    duration = metadata.duration
     if duration is not None and duration > MAX_DURATION_SECONDS:
         raise HTTPException(
             status_code=400,
@@ -640,11 +725,23 @@ async def download(
             )
 
     req_id = uuid.uuid4().hex[:8]
+    request_started = time.monotonic()
     video_id = cache.extract_video_id(url)
     filename = f"drakonrhym_{pitch:+.1f}st.mp3"
 
-    def _success_headers() -> dict[str, str]:
-        h = {"X-Pitch-Applied": f"{pitch:.1f}"}
+    def _success_headers(
+        *,
+        source_provider: str | None = None,
+        download_strategy: str | None = None,
+    ) -> dict[str, str]:
+        h = {
+            "X-Pitch-Applied": f"{pitch:.1f}",
+            "X-Processing-Time": f"{time.monotonic() - request_started:.1f}",
+        }
+        if source_provider:
+            h["X-Source-Provider"] = source_provider
+        if download_strategy:
+            h["X-Download-Strategy"] = download_strategy
         if remaining is not None:
             h["X-Quota-Remaining"] = str(remaining)
         return h
@@ -663,29 +760,72 @@ async def download(
                     cents=cents,
                     status="success",
                 )
-            headers = _success_headers()
+            headers = _success_headers(source_provider="cache")
             headers["Content-Disposition"] = f'attachment; filename="{filename}"'
             headers["X-Cache"] = "HIT"
+            headers["X-Download-Strategy"] = "cache_hit"
             return Response(content=cached, media_type="audio/mpeg", headers=headers)
 
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
     delivered = False
+    provider = "unknown"
+    strategy = "unknown"
+    download_seconds = 0.0
+    pitch_seconds = 0.0
     try:
         async with _download_semaphore:
             logger.info("[%s] download url=%s pitch=%+.1f cache=%s",
                         req_id, url, pitch, "MISS" if video_id else "n/a")
-            source = await _download_audio(url, workdir, req_id)
+            download_started = time.monotonic()
+            try:
+                source_result = await YOUTUBE_DOWNLOADER.download_audio(url, workdir, req_id)
+            except youtube_download.ProviderDownloadError as e:
+                logger.error("[%s] download failed: %s (%s)", req_id, e.message, e.error_kind.value)
+                raise HTTPException(status_code=400, detail=_download_error_detail(e)) from e
+            download_seconds = time.monotonic() - download_started
+            source = source_result.path
+            if source is None:
+                raise HTTPException(status_code=400, detail="Failed to download audio from the given URL.")
+            provider = source_result.external_provider or "yt-dlp"
+            strategy = source_result.download_strategy or "unknown"
+            logger.info(
+                "[%s] source ready via provider=%s strategy=%s resolve=%.1fs materialize=%.1fs download=%.1fs ext=%s bytes=%s",
+                req_id,
+                provider,
+                strategy,
+                source_result.resolve_seconds or 0.0,
+                source_result.materialize_seconds or 0.0,
+                download_seconds,
+                source.suffix.lstrip("."),
+                source_result.filesize,
+            )
             output = workdir / f"shifted_{req_id}.mp3"
+            pitch_started = time.monotonic()
             await _apply_pitch_shift(source, output, pitch_factor, req_id)
+            pitch_seconds = time.monotonic() - pitch_started
+            logger.info("[%s] pitch shift finished in %.1fs", req_id, pitch_seconds)
 
         # Populate cache for the next caller. Read once so we can both stream
         # to the client and stash in Redis without re-reading the file.
+        cache_write_seconds = 0.0
         if video_id is not None:
             try:
+                cache_started = time.monotonic()
                 blob = output.read_bytes()
                 await cache.set(video_id, pitch, blob)
+                cache_write_seconds = time.monotonic() - cache_started
             except Exception:
                 logger.exception("[%s] cache populate failed", req_id)
+        logger.info(
+            "[%s] request complete provider=%s strategy=%s download=%.1fs pitch=%.1fs cache_write=%.1fs total=%.1fs",
+            req_id,
+            provider,
+            strategy,
+            download_seconds,
+            pitch_seconds,
+            cache_write_seconds,
+            time.monotonic() - request_started,
+        )
 
         # Success — persist a "success" download row. Counters were already
         # incremented atomically inside consume_quota.
@@ -699,7 +839,7 @@ async def download(
                 status="success",
             )
 
-        headers = _success_headers()
+        headers = _success_headers(source_provider=provider, download_strategy=strategy)
         headers["X-Cache"] = "MISS"
         response = FileResponse(
             path=output,

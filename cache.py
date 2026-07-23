@@ -25,6 +25,7 @@ logger = logging.getLogger("drakonrhym.cache")
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CACHE_TTL_SECONDS = int(os.getenv("DRAKON_CACHE_TTL_SECONDS", "86400"))
+SOURCE_HINT_TTL_SECONDS = int(os.getenv("DRAKON_SOURCE_HINT_TTL_SECONDS", "1800"))
 
 _YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _client = None  # type: ignore[var-annotated]
@@ -102,3 +103,51 @@ async def set(video_id: str, pitch: float, data: bytes) -> None:
         await client.set(cache_key(video_id, pitch), data, ex=CACHE_TTL_SECONDS)
     except Exception:
         logger.exception("cache.set failed for %s pitch=%s", video_id, pitch)
+
+
+def source_hint_key(video_id: str) -> str:
+    return f"source_hint:{video_id}"
+
+
+async def get_source_hint(video_id: str) -> dict | None:
+    """Return a cached successful source hint for *video_id*, or None."""
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        raw = await client.get(source_hint_key(video_id))
+        if not raw:
+            return None
+        import json
+
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        logger.exception("cache.get_source_hint failed for %s", video_id)
+        return None
+
+
+async def set_source_hint(video_id: str, hint: dict) -> None:
+    """Persist provider/download-url knowledge for reuse across pitch values."""
+    client = _get_client()
+    if client is None:
+        return
+    try:
+        import json
+
+        await client.set(
+            source_hint_key(video_id),
+            json.dumps(hint, ensure_ascii=False).encode("utf-8"),
+            ex=SOURCE_HINT_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("cache.set_source_hint failed for %s", video_id)
+
+
+async def clear_source_hint(video_id: str) -> None:
+    client = _get_client()
+    if client is None:
+        return
+    try:
+        await client.delete(source_hint_key(video_id))
+    except Exception:
+        logger.exception("cache.clear_source_hint failed for %s", video_id)
