@@ -1,57 +1,60 @@
-# YouTube Download Flow — DrakonSub
+# YouTube Download Flow — DrakonRhymServer
 
-Tài liệu này mô tả **đầy đủ nhưng ngắn gọn** flow tải video YouTube hiện tại của DrakonSub, để engineer ở dự án khác có thể triển khai lại cùng behavior.
+Tài liệu này mô tả **đầy đủ nhưng ngắn gọn** flow tải YouTube audio hiện tại của DrakonRhymServer, để engineer ở dự án khác có thể triển khai lại cùng behavior.
 
 ## Mục tiêu
 
-Nhận một **YouTube public video URL**, tải video về server thành file local chuẩn `input.mp4`, trả metadata cần thiết cho pipeline phía sau, đồng thời xử lý tốt các case:
+Nhận một **YouTube public video URL**, tải audio về server thành file local chuẩn `source.mp3`, trả metadata cần thiết cho pipeline pitch-shift phía sau, đồng thời xử lý tốt các case:
 
 - bot-block từ YouTube
 - provider external hết credit
-- video quá dài / quá nặng
-- file tải về không tương thích cho bước xử lý video tiếp theo
+- video quá dài
+- file tải về rỗng hoặc không hợp lệ
 
 ## Phạm vi
 
-Tài liệu này chỉ mô tả **flow download YouTube** hiện tại.
+Tài liệu này chỉ mô tả **flow download YouTube audio** hiện tại.
 
 Không đi sâu vào:
 
-- pipeline tạo subtitle / dịch / render phía sau
-- flow Facebook
+- pipeline pitch-shift / cache phía sau
+- flow Facebook (chưa hỗ trợ)
 - UI frontend chi tiết
 
 ## Entry points hiện tại
 
-Downloader được dùng lại ở 2 flow backend:
+Downloader được dùng ở 2 endpoint backend:
 
-1. `POST /api/jobs/from-url`
-   - tạo job tải video từ URL
-   - tải xong mới cho user bấm xử lý subtitle tiếp
+1. `GET /api/metadata?url=...`
+   - lấy metadata video (title, duration, thumbnail, ...)
+   - **không** consume quota
 
-2. `POST /api/voiceover/script-jobs/from-url`
-   - tải video trước
-   - sau đó đi tiếp sang pipeline voiceover/script
+2. `GET /api/download?url=...&pitch=...`
+   - tải audio, áp dụng pitch shift, trả file MP3
+   - consume daily quota
 
 Core service dùng chung:
 
-- `auto_subtitle/url_import_service.py`
-- `auto_subtitle/youtube_external_download.py`
+- `youtube_external_download.py`
+- `cache.py`
 
 Hàm public chính:
 
 ```python
-download_video_from_url(url: str, output_dir: str | Path, output_filename="input.mp4") -> dict
+# Trong YouTubeDownloadService
+async def fetch_metadata(url: str) -> DownloadResult
+async def download_audio(url: str, workdir: Path, req_id: str) -> DownloadResult
 ```
 
 ## Hành vi tổng quát
 
 Khi URL được nhận diện là YouTube, hệ thống tải theo thứ tự:
 
-1. `Video Download API`
-2. `Tunelio`
-3. `Captapi`
-4. `yt-dlp`
+1. Cache hint (nếu có source hint từ lần tải trước)
+2. `Video Download API`
+3. `Tunelio`
+4. `Captapi`
+5. `yt-dlp`
 
 Nói cách khác: **ưu tiên external providers trước**, chỉ fallback sang `yt-dlp` khi tất cả external providers fail.
 
@@ -59,12 +62,10 @@ Nói cách khác: **ưu tiên external providers trước**, chỉ fallback sang
 
 ### 1. Validate URL
 
-Trước khi download, backend validate:
+Trước khi download, backend validate URL qua `_is_valid_youtube_url()`:
 
-- URL không được rỗng
 - scheme phải là `http` hoặc `https`
-- host không được là localhost / private IP / loopback / `.local`
-- URL phải là **YouTube video URL hợp lệ**
+- host phải thuộc danh sách `ALLOWED_HOSTS`
 
 Các dạng YouTube hiện hỗ trợ:
 
@@ -72,127 +73,67 @@ Các dạng YouTube hiện hỗ trợ:
 - `https://youtu.be/...`
 - `https://www.youtube.com/shorts/...`
 - `https://www.youtube.com/embed/...`
+- `https://music.youtube.com/watch?v=...`
+- `https://m.youtube.com/watch?v=...`
 
-Các link không phải video trực tiếp như homepage / channel / unsupported page sẽ bị reject.
+### 2. Source hint cache (Redis)
 
-Hàm liên quan:
+Trước khi gọi external provider, hệ thống kiểm tra Redis xem có source hint cho video này không:
 
-- `validate_video_url()`
-- `detect_provider()`
-- `validate_url_with_selected_provider()`
+- Key: `source_hint:{video_id}`
+- TTL: `DRAKON_SOURCE_HINT_TTL_SECONDS` (mặc định 1800s = 30 phút)
+- Lưu: provider, key fingerprint, download_url, source_ext, title
 
-## 2. Chuẩn bị output directory
+Nếu có hint hợp lệ, hệ thống dùng thẳng download_url đó mà không cần goi API provider. Nếu fail, hint bị xoá.
 
-Trước mỗi lần tải:
+### 3. Provider chain cho download
 
-- tạo `output_dir` nếu chưa có
-- cleanup file rác / file dở dang
+#### Stage 1 — Best single attempt
 
-Pattern cleanup:
+Chọn provider có score cao nhất, thử download. Nếu thành công → return ngay.
 
-- `input.*`
-- `*.part`
-- `*.ytdl`
+#### Stage 2 — Staged race
 
-Mục tiêu là tránh download cũ làm hỏng lần tải mới.
+Nếu stage 1 fail, chạy song song tối đa `STAGE_RACE_FAMILY_COUNT` provider family khác nhau (mỗi family 1 key). Mỗi attempt chạy trong thư mục riêng để tránh ghi đè. Family nào trả kết quả trước sẽ được chọn. Các attempt bị cancel sẽ được retry ở stage 3.
 
-## 3. Thử external provider chain
+Thời gian chờ race: `DRAKON_STAGE_RACE_DELAY_SECONDS` (mặc định 3s).
 
-Flow YouTube dùng `_try_youtube_external_cascade()`.
+#### Stage 3 — Remaining attempts
 
-Provider order hiện tại:
+Các attempt còn lại (bao gồm cả attempt bị cancel ở stage 2) được thử lần lượt theo scored order.
 
-1. `video-download-api`
-2. `tunelio`
-3. `captapi`
+#### Fallback — yt-dlp
 
-Danh sách provider thực sự được bật tùy theo env key nào đang tồn tại.
+Nếu tất cả external providers fail, hệ thống fallback sang yt-dlp.
 
-### 3.1 Video Download API
+### 4. Provider chain cho metadata
 
-Provider id:
+Đơn giản hơn: thử lần lượt từng provider theo scored order. Nếu tất cả fail → fallback yt-dlp.
 
-```text
-video-download-api
-```
+### 5. Provider health tracking
 
-Endpoint resolve:
+Mỗi provider key được theo dõi:
 
-```text
-https://p.savenow.to/api/v2/download
-```
+- `last_success_at`, `last_failure_at`
+- `failure_streak`
+- `cooldown_until` (dựa trên loại lỗi)
+- `avg_latency_ms`
 
-Behavior:
+Scoring ưu tiên provider vừa success gần đây, phạt provider đang trong cooldown hoặc có nhiều failure.
 
-- request tạo download job
-- nếu response chưa có `url`, provider trả `progress_url`
-- backend poll `progress_url` mỗi 2 giây
-- timeout poll mặc định: `90s`
+Cooldown theo loại lỗi:
 
-Env keys:
+| Error kind | Cooldown |
+|---|---|
+| Cloudflare | 120s |
+| Forbidden | 60s |
+| Timeout | 30s |
+| Bot blocked | 180s |
+| Empty response | 45s |
+| Unavailable | 90s |
+| Credits | 0s (không cooldown, chuyển key ngay) |
 
-- `VIDEO_DOWNLOAD_API_KEY_1`
-- `VIDEO_DOWNLOAD_API_KEY_2`
-- `VIDEO_DOWNLOAD_API_KEY_3`
-- `VIDEO_DOWNLOAD_API_KEY_4`
-
-Legacy compatible:
-
-- `VIDEO_DOWNLOAD_API_KEY`
-
-### 3.2 Tunelio
-
-Provider id:
-
-```text
-tunelio
-```
-
-API flow:
-
-1. gọi `/info`
-2. chọn quality
-3. gọi `/create`
-4. lấy `download_url`
-
-Quality preference hiện tại:
-
-```text
-720p -> 480p -> 360p -> 240p -> 144p
-```
-
-Nếu quality mong muốn không có, hệ thống tự chọn mức phù hợp tiếp theo.
-
-Env key:
-
-- `TUNELIO_API_KEY`
-
-### 3.3 Captapi
-
-Provider id:
-
-```text
-captapi
-```
-
-Endpoint resolve:
-
-```text
-https://api.captapi.com/v1/youtube/video-download
-```
-
-Env keys:
-
-- `CAPTAPI_API_KEY_1`
-- `CAPTAPI_API_KEY_2`
-- `CAPTAPI_API_KEY_3`
-- `CAPTAPI_API_KEY_4`
-
-Legacy compatible:
-
-- `CAPTAPI_API_KEY`
-
-## 4. Cách xử lý provider hết credit
+### 6. Cách xử lý provider hết credit
 
 Đây là behavior quan trọng của flow hiện tại.
 
@@ -201,255 +142,164 @@ Khi external provider trả dấu hiệu hết credit, hệ thống **không fai
 Các tín hiệu được coi là hết credit:
 
 - HTTP `402`
-- error/code như `insufficient_credits`, `payment_required`
-- message chứa:
-  - `out of credits`
-  - `not enough credits`
-  - `no credits`
+- response chứa: `insufficient_credits`, `payment_required`, `out of credits`, `not enough credits`, `no credits`
 
 Behavior:
 
-1. thử API key tiếp theo của cùng provider
+1. thử API key tiếp theo của cùng provider (nếu có multi-key)
 2. nếu hết key thì chuyển sang provider tiếp theo
 3. nếu toàn bộ external chain fail thì mới fallback sang `yt-dlp`
 
-## 5. Download file qua external provider
+### 7. Download file qua external provider
 
 Khi một external provider resolve thành công `download_url`, hệ thống:
 
+- kiểm tra scheme URL chỉ chấp nhận `http`/`https`
 - stream download bằng HTTP GET
-- ghi xuống file trong `output_dir`
-- mặc định tên file đích là `input.mp4`
+- ghi xuống file trong `workdir`
+- tên file đích: `source.{ext}` (ext từ provider hoặc `mp3`)
 - đọc theo chunk `1MB`
+- timeout: 30s
 
 Sau khi tải xong:
 
 - nếu file rỗng hoặc size `<= 0` -> fail
-- trả metadata:
-  - `path`
-  - `provider = "youtube"`
-  - `title`
-  - `duration`
-  - `filesize`
-  - `external_provider`
+- lưu source hint vào Redis
 
-## 6. Fallback sang yt-dlp
+### 8. Fallback sang yt-dlp
 
-Nếu tất cả external providers đều fail, hệ thống gọi `_download_youtube_with_ytdlp()`.
+Nếu tất cả external providers đều fail, hệ thống gọi `_download_audio_with_ytdlp()`.
 
-### yt-dlp options chính
+#### yt-dlp options chính
 
 ```python
 {
-  "format": "bv*+ba/b[ext=mp4]/b",
-  "merge_output_format": "mp4",
-  "outtmpl": "input.%(ext)s",
+  "format": "bestaudio/best",            # DRAKON_YT_DLP_PRIMARY_FORMAT
+  "extract_audio": True,
+  "audio_format": "mp3",
+  "audio_quality": "0",
+  "outtmpl": "source.%(ext)s",
   "noplaylist": True,
-  "max_filesize": MAX_FILE_BYTES,
   "socket_timeout": 30,
-  "quiet": True,
-  "no_warnings": True,
-  "nocheckcertificate": False,
+  "retries": 2,
+  "match_filter": "duration<=420",       # DRAKON_MAX_DURATION_SECONDS
 }
 ```
 
-### Cookie strategy
+#### HLS fallback
 
-#### Ưu tiên 1: server cookie file
+Khi format chính (`bestaudio/best`) trả về lỗi HTTP 403, hệ thống tự động
+thử lại với format HLS thấp hơn (`91/92/93/94/95/96`), vốn ít bị YouTube chặn hơn.
+Có thể cấu hình qua env:
+
+- `DRAKON_YT_DLP_PRIMARY_FORMAT` (mặc định: `bestaudio/best`)
+- `DRAKON_YT_DLP_HLS_FALLBACK_FORMAT` (mặc định: `91/92/93/94/95/96`)
+
+#### Cookie strategy
 
 Env:
 
-- `YT_DLP_COOKIES_FILE`
+- `DRAKON_YT_DLP_COOKIES_FILE` — đường dẫn đến file cookies.txt (Netscape format)
+- `DRAKON_YT_DLP_COOKIES_FROM_BROWSER` — tên browser để lấy cookies (vd: `chrome`, `firefox`, `edge`)
 
-Nếu có:
+Cơ chế:
 
-- copy file cookies sang `/tmp/drakonsub-youtube-cookies.txt`
-- dùng file này cho `yt-dlp`
-- đồng thời set extractor args tối ưu hơn cho YouTube:
+1. Nếu `DRAKON_YT_DLP_COOKIES_FILE` được set, file cookies được **copy** sang thư mục tạm
+   (per-request) trước khi chạy yt-dlp, sau đó tự động xoá. Điều này tránh conflict khi
+   nhiều request chạy đồng thời. Đường dẫn copy: `{workdir}/yt_dlp_cookies_{req_id}.txt`.
+2. Nếu `DRAKON_YT_DLP_COOKIES_FROM_BROWSER` được set (và không có cookies file),
+   yt-dlp dùng `--cookies-from-browser` để lấy cookies từ browser profile.
+3. Nếu cả 2 đều trống, yt-dlp chạy anonymous — dễ bị YouTube chặn.
 
-```python
-{
-  "youtube": {
-    "player_client": ["tv", "web"],
-    "player_skip": ["webpage"],
-  }
-}
-```
+#### JS Runtime
 
-#### Ưu tiên 2: browser cookie retry
+yt-dlp cần JS runtime để giải mã YouTube signature challenge. Cấu hình qua:
 
-Nếu chưa có cookie file, và `yt-dlp` fail với dấu hiệu bot-block như:
+- `DRAKON_YT_DLP_JS_RUNTIME` (mặc định: `deno`)
 
-- `not a bot`
-- `sign in to confirm`
-- `the page needs to be reloaded`
-- `confirm you're not a bot`
+Docker image đã cài sẵn Deno.
 
-thì hệ thống retry **1 lần** với `cookiesfrombrowser`, nếu tìm thấy browser profile local.
-
-Browser sources được dò tự động theo OS:
-
-- macOS: Chrome / Chromium / Edge / Safari
-- Windows: Chrome / Chromium / Edge / Firefox
-- Linux: Chrome / Chromium / Firefox
-
-Nếu retry vẫn fail, hệ thống map lỗi sang message thân thiện cho user.
-
-## 7. Giới hạn hiện tại
+### 9. Giới hạn hiện tại
 
 Giới hạn hard-coded:
 
-- `MAX_DURATION_SECONDS = 30 * 60`
-- `MAX_FILE_BYTES = 500 * 1024 * 1024`
-
-Tức là:
-
-- tối đa **30 phút**
-- tối đa **500MB**
+- `MAX_DURATION_SECONDS = 420` (7 phút) — cấu hình qua `DRAKON_MAX_DURATION_SECONDS`
+- Giới hạn này được enforce ở 2 lớp:
+  - API `/api/download`: kiểm tra duration trước khi download (từ metadata provider hoặc yt-dlp probe)
+  - yt-dlp `--match-filter`: defence-in-depth
+- Ngoài ra còn có rate limit:
+  - `DRAKON_RATE_LIMIT_PER_DAY` (mặc định 20): số lần download tối đa/ngày/user
+  - `DRAKON_MAX_CONCURRENT` (mặc định 2): số request download đồng thời tối đa
 
 Behavior:
 
-- nếu external provider trả duration và duration vượt ngưỡng -> fail
-- với `yt-dlp`, backend gọi `extract_info(download=False)` trước để check duration rồi mới download
-- sau khi file đã tải về, nếu file size vượt ngưỡng -> fail
+- nếu metadata provider trả duration và duration vượt ngưỡng → fail ngay (không consume quota)
+- nếu duration = None (provider không trả duration) → reject với lỗi "Could not determine video duration"
+- với `yt-dlp`, backend gọi `_probe_duration_seconds_with_ytdlp` để check duration sau khi download
 
-Message user-facing:
-
-```text
-Video quá dài hoặc quá nặng so với giới hạn hiện tại.
-```
-
-## 8. Chuẩn hóa file sau khi tải
-
-Sau khi download xong, backend **không dùng file raw ngay**.
-
-Nó chạy bước normalize để đảm bảo output cuối cùng là:
+Message user-facing khi vượt giới hạn:
 
 ```text
-input.mp4
+Only videos under 7 minutes are allowed.
 ```
 
-### Mục tiêu của normalize
-
-Đảm bảo video tương thích tốt cho bước xử lý tiếp theo và playback kiểu QuickTime.
-
-### Logic
-
-1. kiểm tra codec bằng `ffprobe`
-2. nếu file chưa phù hợp thì transcode sang:
-   - video: `h264`
-   - audio: `aac`
-   - pixel format: `yuv420p`
-   - `+faststart`
-
-Nếu file đã là MP4 tương thích sẵn thì chỉ rename/move về `input.mp4`.
-
-## 9. Output contract
-
-Service downloader trả về dict dạng:
+### 10. Output contract (DownloadResult)
 
 ```python
-{
-  "path": "/abs/path/to/input.mp4",
-  "provider": "youtube",
-  "title": "Video title",
-  "duration": 123,
-  "filesize": 4567890,
-  "external_provider": "captapi",  # chỉ có khi dùng external
-}
+@dataclass
+class DownloadResult:
+    path: Path | None        # Local path to audio file
+    provider: str            # Always "youtube"
+    title: str | None
+    duration: int | None
+    filesize: int | None
+    external_provider: str | None  # e.g. "video-download-api"
+    video_id: str | None
+    thumbnail: str | None
+    channel: str | None
+    duration_string: str | None
+    view_count: int | None
+    download_url: str | None
+    source_ext: str | None
+    download_strategy: str | None   # "scored", "staged_race", "cache_hint", "ytdlp_fallback"
+    resolve_seconds: float | None
+    materialize_seconds: float | None
 ```
 
-Field quan trọng:
-
-- `path`: absolute path file đã sẵn sàng dùng
-- `provider`: luôn là `"youtube"` cho flow này
-- `external_provider`: provider external thực tế đã tải thành công
-
-## 10. Error mapping
+### 11. Error mapping
 
 Flow hiện tại không expose raw exception ra user.
 
 Một số mapping quan trọng:
 
-### YouTube bot block
+#### YouTube bot block
 
 Nếu lỗi có dấu hiệu:
 
 - `not a bot`
 - `sign in to confirm`
+- `confirm you're not a bot`
 - `the page needs to be reloaded`
 
 thì user nhận:
 
 ```text
-YouTube chặn tải từ server này. Vui lòng tải file video trực tiếp hoặc liên hệ admin cấu hình cookies.
+YouTube blocked downloads from this server. Please try again later.
 ```
 
-### Generic failures
+#### Provider error mapping (`_download_error_detail`)
 
-Fallback message:
+| Error kind | User-facing message |
+|---|---|
+| `FATAL_USER` | This video is unavailable or cannot be downloaded. |
+| `CLOUDFLARE`, `BOT_BLOCKED` | Temporary upstream block while fetching audio. Please try again shortly. |
+| `TIMEOUT` | Download timed out while contacting upstream providers. Please try again. |
+| `UNAVAILABLE` | Source audio is temporarily unavailable. Please try again later. |
+| Other | Failed to download audio from the given URL. |
 
-```text
-Tải video thất bại. Vui lòng thử lại hoặc tải file video trực tiếp.
-```
+### 12. Environment variables cần mang sang dự án khác
 
-### Restricted/private/login cases
-
-Map thành lỗi thân thiện thay vì raw stack trace.
-
-## 11. Job orchestration trong DrakonSub
-
-Nếu engineer bên kia muốn clone behavior web hiện tại, flow job là:
-
-### Endpoint
-
-```text
-POST /api/jobs/from-url
-```
-
-### Request body tối thiểu
-
-```json
-{
-  "url": "https://www.youtube.com/watch?v=...",
-  "selected_provider": "youtube"
-}
-```
-
-### Response ban đầu
-
-```json
-{
-  "job_id": "...",
-  "source": "url",
-  "provider": "youtube",
-  "status": "downloading",
-  "input_ready": false
-}
-```
-
-### Background behavior
-
-1. validate URL
-2. tạo `job_id`
-3. persist metadata job
-4. background thread gọi `download_video_from_url(...)`
-5. nếu success:
-   - lưu `input.mp4`
-   - job chuyển sang `downloaded`
-6. nếu fail:
-   - cleanup partials
-   - job chuyển sang `error` / `failed`
-
-### Endpoint lấy video gốc đã tải
-
-```text
-GET /api/jobs/{job_id}/input-video
-```
-
-## 12. Environment variables cần mang sang dự án khác
-
-### External providers
+#### External providers
 
 ```text
 VIDEO_DOWNLOAD_API_KEY_1
@@ -472,55 +322,86 @@ VIDEO_DOWNLOAD_API_KEY
 CAPTAPI_API_KEY
 ```
 
-### yt-dlp fallback
+#### yt-dlp fallback
 
 ```text
-YT_DLP_COOKIES_FILE
+DRAKON_YT_DLP_COOKIES_FILE
+DRAKON_YT_DLP_COOKIES_FROM_BROWSER
+DRAKON_YT_DLP_JS_RUNTIME=deno
+DRAKON_YT_DLP_PRIMARY_FORMAT=bestaudio/best
+DRAKON_YT_DLP_HLS_FALLBACK_FORMAT=91/92/93/94/95/96
 ```
 
-## 13. Pseudocode triển khai
+#### Limits
+
+```text
+DRAKON_MAX_DURATION_SECONDS=420
+DRAKON_RATE_LIMIT_PER_DAY=20
+DRAKON_MAX_CONCURRENT=2
+```
+
+#### Redis (recommended)
+
+```text
+REDIS_URL=redis://localhost:6379
+DRAKON_CACHE_TTL_SECONDS=86400
+DRAKON_SOURCE_HINT_TTL_SECONDS=1800
+```
+
+### 13. Pseudocode triển khai
 
 ```python
-def download_video_from_url(url, output_dir, output_filename="input.mp4"):
-    safe_url = validate_video_url(url)
-    provider = detect_provider(safe_url)
-    assert provider == "youtube"
+# YouTubeDownloadService.download_audio (simplified)
+async def download_audio(url, workdir, req_id):
+    # Try source hint from Redis
+    video_id = extract_video_id(url)
+    if video_id:
+        hinted = await try_source_hint(video_id, workdir, req_id)
+        if hinted:
+            return hinted
 
-    ensure_dir(output_dir)
-    cleanup_partial_downloads(output_dir)
+    # Schedule attempts by health score
+    attempts = schedule_attempts("download")
+    if not attempts:
+        return await ytdlp_fallback(url, workdir, req_id)
 
-    for external_provider in available_external_providers_in_order():
-        try:
-            result = external_download(safe_url, output_dir, output_filename, external_provider)
-            validate_duration_limit(result.duration)
-            return finalize_downloaded_video(output_dir, result)
-        except CreditsExhausted:
-            cleanup_partial_downloads(output_dir)
-            continue
-        except ExternalDownloadError:
-            cleanup_partial_downloads(output_dir)
-            continue
+    # Stage 1: best single attempt
+    result = await execute_download(attempts[0], url, workdir, req_id)
+    if result:
+        return result
 
-    result = download_with_ytdlp(safe_url, output_dir, output_filename)
-    return finalize_downloaded_video(output_dir, result)
+    # Stage 2: staged race
+    family_leaders = get_best_per_family(attempts[1:])
+    winner = await staged_race(family_leaders, url, workdir, req_id)
+    if winner:
+        return winner
+
+    # Stage 3: remaining attempts
+    for spec in remaining_attempts:
+        result = await execute_download(spec, url, workdir, req_id)
+        if result:
+            return result
+
+    # Fallback to yt-dlp
+    return await ytdlp_fallback(url, workdir, req_id)
 ```
 
-## 14. Những điểm không nên bỏ qua khi clone flow
+### 14. Những điểm không nên bỏ qua khi clone flow
 
 - Phải có **provider chain + credit-aware fallback**, không chỉ gọi một provider duy nhất.
+- Phải có **multi-key retry** cho từng provider.
+- Phải có **health tracking + cooldown** để tránh gọi provider đang lỗi liên tục.
+- Phải có **staged race** để tận dụng nhiều provider song song.
 - Phải có **yt-dlp fallback**, nếu không tỷ lệ fail thực tế sẽ cao.
 - Phải có **cookie strategy** cho `yt-dlp`.
-- Phải có **cleanup partial files** trước/sau fail.
-- Phải có **normalize về MP4 tương thích** sau khi tải.
-- Phải có **duration/file size limits** để tránh job nặng phá server.
+- Phải có **scheme validation** khi mở URL từ provider (chỉ http/https).
+- Phải có **duration limits** để tránh video quá dài.
 - Phải map lỗi sang message thân thiện; không nên trả raw lỗi provider/yt-dlp cho user.
 
-## 15. File code gốc để tham chiếu
+### 15. File code gốc để tham chiếu
 
-- `auto_subtitle/url_import_service.py`
-- `auto_subtitle/youtube_external_download.py`
-- `auto_subtitle/web.py`
-- `tests/test_url_import_service.py`
-- `tests/test_url_import_web.py`
+- `youtube_external_download.py` — core download service
+- `main.py` — FastAPI endpoints, yt-dlp integration
+- `cache.py` — Redis cache + source hint
 - `tests/test_youtube_external_download.py`
-
+- `tests/test_main_external_integration.py`

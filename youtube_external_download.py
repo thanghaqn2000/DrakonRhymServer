@@ -32,6 +32,26 @@ STAGE_RACE_FAMILY_COUNT = max(1, int(os.getenv("DRAKON_STAGE_RACE_FAMILY_COUNT",
 
 @dataclass
 class DownloadResult:
+    """Result of a YouTube audio download attempt.
+
+    Attributes:
+        path: Local path to the downloaded audio file, or None if not yet materialized.
+        provider: Always "youtube" for this service.
+        title: Video title, if available.
+        duration: Video duration in seconds.
+        filesize: File size in bytes.
+        external_provider: Name of the external provider that served the download, e.g. "video-download-api".
+        video_id: YouTube video ID (11 characters).
+        thumbnail: URL to video thumbnail.
+        channel: Channel/video uploader name.
+        duration_string: Human-readable duration, e.g. "5:30".
+        view_count: Number of views.
+        download_url: Resolved download URL from the provider.
+        source_ext: File extension of the downloaded source, e.g. "mp3".
+        download_strategy: Strategy label for logging/metrics, e.g. "scored", "staged_race", "cache_hint".
+        resolve_seconds: Time spent resolving the download URL (provider API call).
+        materialize_seconds: Time spent downloading the file from the resolved URL.
+    """
     path: Path | None
     provider: str
     title: str | None
@@ -402,12 +422,15 @@ class YouTubeDownloadService:
         ytdlp_metadata_fetcher: Callable[[str], Awaitable[DownloadResult]] | None = None,
         ytdlp_downloader: Callable[[str, Path, str], Awaitable[DownloadResult]] | None = None,
     ) -> "YouTubeDownloadService":
+        video_download_api_keys = _env_keys("VIDEO_DOWNLOAD_API_KEY", "VIDEO_DOWNLOAD_API_KEY")
+        tunelio_api_key = _first_env("TUNELIO_API_KEY")
+        captapi_api_keys = _env_keys("CAPTAPI_API_KEY", "CAPTAPI_API_KEY")
         return cls(
             ytdlp_metadata_fetcher=ytdlp_metadata_fetcher,
             ytdlp_downloader=ytdlp_downloader,
-            video_download_api_keys=_env_keys("VIDEO_DOWNLOAD_API_KEY", "VIDEO_DOWNLOAD_API_KEY"),
-            tunelio_api_key=_first_env("TUNELIO_API_KEY"),
-            captapi_api_keys=_env_keys("CAPTAPI_API_KEY", "CAPTAPI_API_KEY"),
+            video_download_api_keys=video_download_api_keys if video_download_api_keys else None,
+            tunelio_api_key=tunelio_api_key if tunelio_api_key else None,
+            captapi_api_keys=captapi_api_keys if captapi_api_keys else None,
         )
 
     def is_external_enabled(self) -> bool:
@@ -453,7 +476,7 @@ class YouTubeDownloadService:
         cooled = [s for s in scored if not self._health.in_cooldown(s.provider_name, s.api_key, s.mode)]
         if cooled:
             return cooled
-        return scored[:1] + [s for s in scored[1:]]
+        return scored
 
     def _best_attempt_per_family(self, attempts: list[AttemptSpec]) -> list[AttemptSpec]:
         seen: set[str] = set()
@@ -727,8 +750,14 @@ class YouTubeDownloadService:
                         break
 
             if pending:
+                # Restore cancelled attempts back to remaining so stage 3 can retry them.
                 for task in pending:
                     task.cancel()
+                    spec = race_tasks.get(task)
+                    if spec is not None:
+                        tried_keys.discard((spec.provider_name, spec.api_key))
+                        if spec not in remaining:
+                            remaining.append(spec)
                 await asyncio.gather(*pending, return_exceptions=True)
 
             if winner is not None:
@@ -1020,7 +1049,7 @@ class YouTubeDownloadService:
             duration_string=_duration_string(_coerce_int(_nested_get(data, ("duration",)))),
             view_count=_coerce_int(_nested_get(data, ("viewCount",), ("views",))),
             download_url=str(download_url),
-            source_ext=_nested_get(data, ("format",)) or _extension_from_url(str(download_url)),
+            source_ext=_nested_get(data, ("format",)) or _extension_from_url(str(download_url), fallback="mp3"),
         )
 
     async def materialize_download(self, result: DownloadResult, workdir: Path, *, stem: str = "source") -> DownloadResult:

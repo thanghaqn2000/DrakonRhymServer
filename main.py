@@ -236,7 +236,7 @@ def _yt_dlp_js_runtime_args() -> list[str]:
     return ["--js-runtimes", YT_DLP_JS_RUNTIME]
 
 
-def _yt_dlp_cmd(*args: str, cookies_file: str | None = None) -> list[str]:
+def _yt_dlp_cmd(*args: str, cookies_file: Optional[str] = None) -> list[str]:
     return [
         sys.executable,
         "-m",
@@ -370,6 +370,15 @@ def _should_retry_with_hls_fallback(stderr: bytes) -> bool:
     return "http error 403" in text or "403 forbidden" in text
 
 
+def _raise_if_bot_blocked(decoded: str) -> None:
+    """Raise HTTPException if the decoded stderr contains a bot-block signal."""
+    if youtube_download._contains_bot_signal(decoded):
+        raise HTTPException(
+            status_code=400,
+            detail="YouTube blocked downloads from this server. Please try again later.",
+        )
+
+
 async def _fetch_metadata_with_ytdlp(url: str) -> youtube_download.DownloadResult:
     req_id = uuid.uuid4().hex[:8]
     args = [
@@ -385,11 +394,7 @@ async def _fetch_metadata_with_ytdlp(url: str) -> youtube_download.DownloadResul
     if code != 0:
         decoded = stderr.decode(errors="replace")
         logger.error("[%s] metadata fetch failed: %s", req_id, decoded)
-        if youtube_download._contains_bot_signal(decoded):
-            raise HTTPException(
-                status_code=400,
-                detail="YouTube blocked downloads from this server. Please try again later.",
-            )
+        _raise_if_bot_blocked(decoded)
         raise HTTPException(status_code=400, detail="Could not read video metadata.")
 
     try:
@@ -440,11 +445,7 @@ async def _download_audio_with_ytdlp(
     if code != 0:
         decoded = stderr.decode(errors="replace")
         logger.error("[%s] yt-dlp failed: %s", req_id, decoded)
-        if youtube_download._contains_bot_signal(decoded):
-            raise HTTPException(
-                status_code=400,
-                detail="YouTube blocked downloads from this server. Please try again later.",
-            )
+        _raise_if_bot_blocked(decoded)
         raise HTTPException(status_code=400, detail="Failed to download audio from the given URL.")
 
     candidates = list(workdir.glob("source.*"))
@@ -563,7 +564,7 @@ async def health() -> dict[str, str]:
 @app.get("/api/metadata")
 async def metadata(
     url: str = Query(..., description="YouTube URL"),
-    authorization: str | None = Header(None, alias="Authorization"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     user_sub, _user_row = await _auth_and_upsert(authorization)
     # Burst cap: signed-in users can't spam yt-dlp subprocesses by hammering
@@ -587,7 +588,7 @@ async def metadata(
         data = await YOUTUBE_DOWNLOADER.fetch_metadata(url)
     except youtube_download.ProviderDownloadError as e:
         logger.error("metadata fetch failed: %s", e.message)
-        raise HTTPException(status_code=400, detail="Could not read video metadata.") from e
+        raise HTTPException(status_code=400, detail=_download_error_detail(e)) from e
 
     return {
         "title": data.title,
@@ -622,7 +623,7 @@ async def download(
         le=6.0,
         description="Pitch shift in semitones (range -6.0..6.0, step 0.1)",
     ),
-    authorization: str | None = Header(None, alias="Authorization"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     user_sub, user_row = await _auth_and_upsert(authorization)
 
@@ -645,7 +646,13 @@ async def download(
         logger.error("metadata fetch failed before download: %s", e.message)
         raise HTTPException(status_code=400, detail="Could not read video metadata.") from e
     duration = metadata.duration
-    if duration is not None and duration > MAX_DURATION_SECONDS:
+    if duration is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not determine video duration. Only videos under "
+            f"{MAX_DURATION_SECONDS // 60} minutes are allowed.",
+        )
+    if duration > MAX_DURATION_SECONDS:
         raise HTTPException(
             status_code=400,
             detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
@@ -659,7 +666,7 @@ async def download(
     # is True — refunding on a denied (429) consume would credit the user.
     quota_consumed = False
     used_db_quota = False
-    remaining: int | None = None
+    remaining: Optional[int] = None
     if user_sub is not None:
         if user_row is not None:
             result = await asyncio.to_thread(db.consume_quota, user_row["id"])
@@ -731,8 +738,8 @@ async def download(
 
     def _success_headers(
         *,
-        source_provider: str | None = None,
-        download_strategy: str | None = None,
+        source_provider: Optional[str] = None,
+        download_strategy: Optional[str] = None,
     ) -> dict[str, str]:
         h = {
             "X-Pitch-Applied": f"{pitch:.1f}",
@@ -760,10 +767,9 @@ async def download(
                     cents=cents,
                     status="success",
                 )
-            headers = _success_headers(source_provider="cache")
+            headers = _success_headers(source_provider="cache", download_strategy="cache_hit")
             headers["Content-Disposition"] = f'attachment; filename="{filename}"'
             headers["X-Cache"] = "HIT"
-            headers["X-Download-Strategy"] = "cache_hit"
             return Response(content=cached, media_type="audio/mpeg", headers=headers)
 
     workdir = Path(tempfile.mkdtemp(prefix="drakonrhym_"))
@@ -873,7 +879,7 @@ async def download(
 
 
 @app.get("/api/me")
-async def me(authorization: str | None = Header(None, alias="Authorization")):
+async def me(authorization: Optional[str] = Header(None, alias="Authorization")):
     """Return the signed-in user's profile + current quota state.
 
     Requires a valid bearer token. If Supabase is not configured, returns just

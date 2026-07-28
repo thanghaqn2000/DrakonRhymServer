@@ -16,6 +16,7 @@ on disk" — same interface, different backing store.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -118,8 +119,6 @@ async def get_source_hint(video_id: str) -> dict | None:
         raw = await client.get(source_hint_key(video_id))
         if not raw:
             return None
-        import json
-
         return json.loads(raw.decode("utf-8"))
     except Exception:
         logger.exception("cache.get_source_hint failed for %s", video_id)
@@ -132,8 +131,6 @@ async def set_source_hint(video_id: str, hint: dict) -> None:
     if client is None:
         return
     try:
-        import json
-
         await client.set(
             source_hint_key(video_id),
             json.dumps(hint, ensure_ascii=False).encode("utf-8"),
