@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -346,6 +348,11 @@ def _http_get_json(url: str, *, headers: dict[str, str] | None = None, timeout: 
 
 
 def _download_to_file(url: str, destination: Path, *, timeout: int = DEFAULT_HTTP_TIMEOUT) -> int:
+    """Download a URL to a file, only accepting http/https schemes."""
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"Unsupported URL scheme: {scheme!r}. Only http and https are allowed.")
     request = Request(url)
     with urlopen(request, timeout=timeout) as response, destination.open("wb") as output:
         total = 0
@@ -675,9 +682,15 @@ class YouTubeDownloadService:
             logger.info("[%s] staged race across %d provider families", req_id, len(family_leaders))
 
             async def _race_one(spec: AttemptSpec) -> DownloadResult | None:
-                return await self._execute_download_attempt(
-                    spec, url, workdir, req_id, strategy="staged_race", errors=errors
-                )
+                # Use a unique subdirectory so concurrent providers cannot
+                # overwrite each other's output.
+                race_dir = Path(tempfile.mkdtemp(prefix=f"drakonrhym_race_{spec.provider_name}_", dir=workdir))
+                try:
+                    return await self._execute_download_attempt(
+                        spec, url, race_dir, req_id, strategy="staged_race", errors=errors
+                    )
+                finally:
+                    shutil.rmtree(race_dir, ignore_errors=True)
 
             race_tasks = {asyncio.create_task(_race_one(spec)): spec for spec in family_leaders}
             for spec in family_leaders:
