@@ -135,19 +135,18 @@ _metadata_rate = _RateLimiter(limit=30, window_seconds=60)
 def _verify_google_id_token_claims(authorization: Optional[str]) -> Optional[dict]:
     """Verify a Bearer ID token and return the full claims dict.
 
-    Raises 401 on any failure. Returns None when `GOOGLE_CLIENT_ID` is empty
-    (DEV mode — auth is disabled).
+    Returns None when `GOOGLE_CLIENT_ID` is empty (DEV mode — auth is disabled)
+    OR when no token is provided (anonymous access allowed). Raises 401 only
+    when a token IS provided but is invalid/malformed.
     """
     if not GOOGLE_CLIENT_ID:
         return None
     if not authorization or not authorization.startswith("Bearer "):
-        # Never log the header value itself — even a malformed value might
-        # contain a real bearer token someone tried to send.
-        logger.info("Auth rejected: header missing or malformed")
-        raise HTTPException(status_code=401, detail="Missing bearer token.")
+        # No token → anonymous access (rate-limited in-memory).
+        return None
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Empty bearer token.")
+        return None
     try:
         claims = google_id_token.verify_oauth2_token(token, _google_request, GOOGLE_CLIENT_ID)
     except ValueError as e:
