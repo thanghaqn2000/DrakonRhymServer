@@ -347,6 +347,15 @@ def _contains_bot_signal(message: str) -> bool:
     )
 
 
+def _thumbnail_fallback(video_id: str | None, thumbnail: str | None) -> str | None:
+    """Return a thumbnail URL. Prefer the provided one, else build from YouTube CDN."""
+    if thumbnail:
+        return thumbnail
+    if video_id and re.match(r"^[A-Za-z0-9_-]{11}$", video_id):
+        return f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+    return None
+
+
 def _http_get_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = DEFAULT_HTTP_TIMEOUT) -> tuple[int, dict]:
     request = Request(url, headers=headers or {})
     try:
@@ -897,7 +906,11 @@ class YouTubeDownloadService:
         download_url = _nested_get(payload, ("resolved_url",), ("url",), ("download_url",), ("data", "url"))
         title = _nested_get(payload, ("title",), ("data", "title"), ("filename",), ("data", "filename"))
         duration = _coerce_int(_nested_get(payload, ("duration",), ("data", "duration")))
-        thumbnail = _nested_get(payload, ("thumbnail",), ("data", "thumbnail"))
+        video_id = _extract_video_id(source_url)
+        thumbnail = _thumbnail_fallback(
+            video_id,
+            _nested_get(payload, ("thumbnail",), ("data", "thumbnail")),
+        )
         if mode == "metadata" and not any([title, duration, thumbnail, download_url]):
             raise ProviderDownloadError("video-download-api", "Metadata response was empty.")
         return DownloadResult(
@@ -907,8 +920,8 @@ class YouTubeDownloadService:
             duration=duration,
             filesize=_coerce_int(_nested_get(payload, ("filesize",), ("size",), ("data", "filesize"), ("data", "size"))),
             external_provider="video-download-api",
-            video_id=_extract_video_id(source_url),
-            thumbnail=str(thumbnail) if thumbnail is not None else None,
+            video_id=video_id,
+            thumbnail=thumbnail,
             channel=None,
             duration_string=_duration_string(duration),
             view_count=None,
@@ -950,6 +963,7 @@ class YouTubeDownloadService:
         payload = await asyncio.to_thread(_fetch)
         if str(payload.get("status", "")).lower() not in {"", "ok", "success"} and not payload.get("url"):
             raise ProviderDownloadError("tunelio", str(payload.get("status") or payload))
+        video_id = _extract_video_id(url)
         return DownloadResult(
             path=None,
             provider="youtube",
@@ -957,8 +971,8 @@ class YouTubeDownloadService:
             duration=_coerce_int(payload.get("duration")),
             filesize=_coerce_int(payload.get("file_size")),
             external_provider="tunelio",
-            video_id=_extract_video_id(url),
-            thumbnail=payload.get("thumbnail"),
+            video_id=video_id,
+            thumbnail=_thumbnail_fallback(video_id, payload.get("thumbnail")),
             channel=payload.get("author") or payload.get("channel"),
             duration_string=_duration_string(_coerce_int(payload.get("duration"))),
             view_count=_coerce_int(payload.get("view_count")),
@@ -968,6 +982,7 @@ class YouTubeDownloadService:
 
     def _normalize_tunelio_metadata(self, payload: dict, source_url: str) -> DownloadResult:
         duration = _coerce_int(payload.get("duration"))
+        video_id = _extract_video_id(source_url)
         return DownloadResult(
             path=None,
             provider="youtube",
@@ -975,8 +990,8 @@ class YouTubeDownloadService:
             duration=duration,
             filesize=None,
             external_provider="tunelio",
-            video_id=_extract_video_id(source_url),
-            thumbnail=payload.get("thumbnail"),
+            video_id=video_id,
+            thumbnail=_thumbnail_fallback(video_id, payload.get("thumbnail")),
             channel=payload.get("author") or payload.get("channel"),
             duration_string=payload.get("duration_string") or _duration_string(duration),
             view_count=_coerce_int(payload.get("view_count")),
@@ -1001,6 +1016,7 @@ class YouTubeDownloadService:
         payload = await asyncio.to_thread(_fetch)
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
         duration = _coerce_int(_nested_get(data, ("duration",), ("lengthSeconds",)))
+        video_id = _extract_video_id(url) or _nested_get(data, ("videoId",), ("id",))
         return DownloadResult(
             path=None,
             provider="youtube",
@@ -1008,8 +1024,8 @@ class YouTubeDownloadService:
             duration=duration,
             filesize=None,
             external_provider="captapi",
-            video_id=_extract_video_id(url) or _nested_get(data, ("videoId",), ("id",)),
-            thumbnail=_nested_get(data, ("thumbnail",), ("thumbnailUrl",)),
+            video_id=video_id,
+            thumbnail=_thumbnail_fallback(video_id, _nested_get(data, ("thumbnail",), ("thumbnailUrl",))),
             channel=_nested_get(data, ("channel",), ("author",), ("ownerChannelName",)),
             duration_string=_nested_get(data, ("durationString",)) or _duration_string(duration),
             view_count=_coerce_int(_nested_get(data, ("viewCount",), ("views",))),
@@ -1036,6 +1052,7 @@ class YouTubeDownloadService:
         download_url = _nested_get(data, ("downloadUrl",), ("url",))
         if not download_url:
             raise ProviderDownloadError("captapi", "Missing download URL.")
+        video_id = _extract_video_id(url) or _nested_get(data, ("videoId",), ("id",))
         return DownloadResult(
             path=None,
             provider="youtube",
@@ -1043,8 +1060,8 @@ class YouTubeDownloadService:
             duration=_coerce_int(_nested_get(data, ("duration",))),
             filesize=_coerce_int(_nested_get(data, ("sizeBytes",), ("filesize",))),
             external_provider="captapi",
-            video_id=_extract_video_id(url) or _nested_get(data, ("videoId",), ("id",)),
-            thumbnail=_nested_get(data, ("thumbnail",), ("thumbnailUrl",)),
+            video_id=video_id,
+            thumbnail=_thumbnail_fallback(video_id, _nested_get(data, ("thumbnail",), ("thumbnailUrl",))),
             channel=_nested_get(data, ("channel",), ("author",)),
             duration_string=_duration_string(_coerce_int(_nested_get(data, ("duration",)))),
             view_count=_coerce_int(_nested_get(data, ("viewCount",), ("views",))),
@@ -1083,4 +1100,3 @@ class YouTubeDownloadService:
         result.path = destination
         result.filesize = filesize
         return result
-
