@@ -646,13 +646,7 @@ async def download(
         logger.error("metadata fetch failed before download: %s", e.message)
         raise HTTPException(status_code=400, detail="Could not read video metadata.") from e
     duration = metadata.duration
-    if duration is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not determine video duration. Only videos under "
-            f"{MAX_DURATION_SECONDS // 60} minutes are allowed.",
-        )
-    if duration > MAX_DURATION_SECONDS:
+    if duration is not None and duration > MAX_DURATION_SECONDS:
         raise HTTPException(
             status_code=400,
             detail=f"Only videos under {MAX_DURATION_SECONDS // 60} minutes are allowed.",
