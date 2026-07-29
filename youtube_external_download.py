@@ -410,9 +410,9 @@ class YouTubeDownloadService:
         self._ytdlp_downloader = ytdlp_downloader
         self._health = health or _HEALTH
         self._providers = [
-            ("video-download-api", video_download_api_keys or ["key-1", "key-2"]),
-            ("tunelio", [tunelio_api_key or "tunelio-key"]),
-            ("captapi", captapi_api_keys or ["capt-1"]),
+            ("video-download-api", (video_download_api_keys if video_download_api_keys else [])),
+            ("tunelio", [tunelio_api_key] if tunelio_api_key else []),
+            ("captapi", (captapi_api_keys if captapi_api_keys else [])),
         ]
 
     @classmethod
